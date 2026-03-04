@@ -1,4 +1,6 @@
 
+check-stores.js
+
 # Playwright
 node_modules/
 /test-results/

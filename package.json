@@ -11,5 +11,13 @@
   "devDependencies": {
     "@playwright/test": "^1.58.2",
     "@types/node": "^25.3.3"
+  },
+  "dependencies": {
+    "@mozilla/readability": "^0.6.0",
+    "better-sqlite3": "^12.6.2",
+    "chromadb": "^3.3.1",
+    "jsdom": "^28.1.0",
+    "playwright-extra": "^4.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2"
   }
 }
