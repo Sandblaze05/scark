@@ -1,0 +1,1 @@
+{"version":3,"sources":["../../../../../renderer/app/page.jsx"],"sourcesContent":["export default function Home() {\r\n    return <div id=\"root\"></div>;\r\n}\r\n"],"names":[],"mappings":"kKAAe,SAAS,IACpB,MAAO,CAAA,EAAA,EAAA,GAAA,EAAC,MAAA,CAAI,GAAG,QACnB"}

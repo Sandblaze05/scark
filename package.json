@@ -2,22 +2,39 @@
   "name": "scark",
   "version": "1.0.0",
   "description": "",
-  "main": "index.js",
-  "scripts": {},
+  "main": "electron/main.js",
+  "scripts": {
+    "dev:renderer": "next dev renderer --port 3000",
+    "dev:electron": "electron .",
+    "dev": "concurrently -k \"npm:dev:renderer\" \"npm:dev:electron\"",
+    "build:renderer": "next build renderer",
+    "build": "npm run build:renderer && electron-builder",
+    "start": "electron .",
+    "pipeline": "node index.js"
+  },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "type": "module",
   "devDependencies": {
     "@playwright/test": "^1.58.2",
-    "@types/node": "^25.3.3"
+    "@types/node": "^25.3.3",
+    "concurrently": "^9.1.0",
+    "electron": "^34.0.0",
+    "electron-builder": "^25.1.0"
   },
   "dependencies": {
     "@mozilla/readability": "^0.6.0",
+    "@tailwindcss/postcss": "^4.2.1",
     "better-sqlite3": "^12.6.2",
     "chromadb": "^3.3.1",
     "jsdom": "^28.1.0",
+    "next": "^16.1.6",
     "playwright-extra": "^4.3.6",
-    "puppeteer-extra-plugin-stealth": "^2.11.2"
+    "postcss": "^8.5.8",
+    "puppeteer-extra-plugin-stealth": "^2.11.2",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "tailwindcss": "^4.2.1"
   }
 }

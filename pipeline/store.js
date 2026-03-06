@@ -10,8 +10,8 @@
  *   Output:  { chroma: number, sqlite: { pages, chunks } }
  */
 
-import { storeInChroma }                 from '../services/chromaService.js';
-import { storeInSQLite, getExistingUrls } from '../services/sqliteService.js';
+import { storeInChroma }                              from '../services/chromaService.js';
+import { storeInSQLite, getExistingUrls, getPageText } from '../services/sqliteService.js';
 
 /**
  * Persist results to both ChromaDB and SQLite concurrently.
@@ -42,3 +42,4 @@ export async function store(embeddedPages) {
  * @returns {Set<string>}
  */
 export { getExistingUrls } from '../services/sqliteService.js';
+export { getPageText }    from '../services/sqliteService.js';

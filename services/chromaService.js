@@ -23,7 +23,7 @@ async function getCollection() {
     });
 
     // Pass a no-op embeddingFunction so Chroma never tries to load
-    // @chroma-core/default-embed – we always supply our own vectors from Ollama.
+    // @chroma-core/default-embed - we always supply our own vectors from Ollama.
     const noopEmbedder = { generate: async (texts) => texts.map(() => []) };
 
     _collection = await _client.getOrCreateCollection({
@@ -32,7 +32,7 @@ async function getCollection() {
         embeddingFunction: noopEmbedder,
     });
 
-    console.log(`[ChromaDB] Connected – collection "${COLLECTION_NAME}" ready.`);
+    console.log(`[ChromaDB] Connected - collection "${COLLECTION_NAME}" ready.`);
     return _collection;
 }
 
@@ -75,7 +75,7 @@ export async function storeInChroma(results) {
     }
 
     if (ids.length === 0) {
-        console.log('[ChromaDB] No embedded chunks to store – skipping.');
+        console.log('[ChromaDB] No embedded chunks to store - skipping.');
         return 0;
     }
 
@@ -98,8 +98,8 @@ export async function storeInChroma(results) {
  * Query the ChromaDB collection for the top-k nearest chunks to a query
  * embedding.  Returns ChromaDB's raw QueryResponse.
  *
- * @param {number[]} queryEmbedding  – pre-computed embedding vector
- * @param {number}   topK            – number of results (default 5)
+ * @param {number[]} queryEmbedding  - pre-computed embedding vector
+ * @param {number}   topK            - number of results (default 5)
  */
 export async function queryChroma(queryEmbedding, topK = 5) {
     const col = await getCollection();

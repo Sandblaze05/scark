@@ -7,7 +7,7 @@ import fs from 'fs';
 /**
  * Generate an embedding for a single text via Ollama.
  */
-async function embed(text) {
+export async function embedText(text) {
     const res = await fetch(`${OLLAMA_BASE_URL}/api/embed`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -116,7 +116,7 @@ export async function search(query, topK = 5, file = DEFAULT_FILE) {
     const records = loadEmbeddings(file);
     if (records.length === 0) return [];
 
-    const queryVec = await embed(query);
+    const queryVec = await embedText(query);
 
     const scored = records.map(r => ({
         ...r,

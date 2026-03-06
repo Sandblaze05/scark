@@ -5,36 +5,159 @@
  * and return raw page objects.  Link discovery feeds the queue so the crawl
  * expands breadth-first.
  *
+ * Stop condition: **topic saturation** rather than a fixed page count.
+ * The crawler tracks three metrics over a sliding window of recent pages:
+ *
+ *   1. Keyword relevance rate – fraction of recent pages containing the topic keyword
+ *   2. Content novelty        – ratio of never-seen-before word trigrams
+ *   3. Consecutive misses     – streak of pages with zero keyword hits
+ *
+ * When relevance AND novelty both drop below their thresholds (or the
+ * miss streak exceeds its limit), the crawl stops.  A hard cap prevents
+ * runaway crawls.
+ *
  * Data contract
  * ─────────────
  *   Input :  browser, seedUrls[], opts
  *   Output:  RawPage[] — { url, title, html, bodyText, links[] }
- *
- * The raw HTML is preserved so downstream stages (Cleaner) can re-process it
- * independently of the crawl.
  */
 
 import { crawler as defaults } from './config.js';
 
+// ── Saturation tracker ────────────────────────────────────
+
+class SaturationTracker {
+    #keyword;
+    #window;          // sliding-window size
+    #minRelevance;
+    #minNovelty;
+    #maxMisses;
+    #hardMax;
+
+    #relevanceRing;   // circular buffer: 1 = relevant, 0 = not
+    #ringIdx = 0;
+    #seenShingles = new Set();
+    #consecutiveMisses = 0;
+    #totalPages = 0;
+
+    constructor(opts = {}) {
+        this.#keyword       = (opts.keyword ?? '').toLowerCase();
+        this.#window        = opts.saturationWindow     ?? 10;
+        this.#minRelevance  = opts.minRelevance          ?? 0.3;
+        this.#minNovelty    = opts.minNovelty             ?? 0.15;
+        this.#maxMisses     = opts.maxConsecutiveMisses   ?? 5;
+        this.#hardMax       = opts.hardMaxPages           ?? 100;
+        this.#relevanceRing = new Array(this.#window).fill(-1); // -1 = unfilled
+    }
+
+    /** Generate word-trigram shingles from text */
+    #shingles(text) {
+        const words = text.toLowerCase().split(/\s+/).filter(Boolean);
+        const out = new Set();
+        for (let i = 0; i <= words.length - 3; i++) {
+            out.add(`${words[i]} ${words[i + 1]} ${words[i + 2]}`);
+        }
+        return out;
+    }
+
+    /**
+     * Feed a page's body text and return whether crawling should continue.
+     * @returns {{ shouldContinue: boolean, reason?: string, metrics: object }}
+     */
+    record(bodyText) {
+        this.#totalPages++;
+
+        // ── Keyword relevance ─────────────────────────────
+        const hasKeyword = this.#keyword
+            ? bodyText.toLowerCase().includes(this.#keyword)
+            : true;  // no keyword → every page counts as relevant
+
+        this.#relevanceRing[this.#ringIdx % this.#window] = hasKeyword ? 1 : 0;
+        this.#ringIdx++;
+
+        if (hasKeyword) {
+            this.#consecutiveMisses = 0;
+        } else {
+            this.#consecutiveMisses++;
+        }
+
+        // ── Content novelty ───────────────────────────────
+        const pageShingles = this.#shingles(bodyText);
+        let newCount = 0;
+        for (const s of pageShingles) {
+            if (!this.#seenShingles.has(s)) {
+                newCount++;
+                this.#seenShingles.add(s);
+            }
+        }
+        const novelty = pageShingles.size > 0 ? newCount / pageShingles.size : 0;
+
+        // ── Sliding-window relevance rate ─────────────────
+        const filled = this.#relevanceRing.filter(v => v !== -1);
+        const relevanceRate = filled.length > 0
+            ? filled.reduce((a, b) => a + b, 0) / filled.length
+            : 1;
+
+        const metrics = {
+            totalPages: this.#totalPages,
+            relevanceRate: +relevanceRate.toFixed(3),
+            novelty: +novelty.toFixed(3),
+            consecutiveMisses: this.#consecutiveMisses,
+        };
+
+        // ── Stop conditions ───────────────────────────────
+        if (this.#totalPages >= this.#hardMax) {
+            return { shouldContinue: false, reason: 'hard page cap reached', metrics };
+        }
+        if (this.#consecutiveMisses >= this.#maxMisses) {
+            return { shouldContinue: false, reason: `${this.#maxMisses} consecutive misses`, metrics };
+        }
+        // Only evaluate sliding-window thresholds once the window is full
+        if (filled.length >= this.#window) {
+            if (relevanceRate < this.#minRelevance && novelty < this.#minNovelty) {
+                return { shouldContinue: false, reason: 'topic saturated (low relevance + low novelty)', metrics };
+            }
+        }
+
+        return { shouldContinue: true, metrics };
+    }
+}
+
+// ── Crawler ───────────────────────────────────────────────
+
 /**
  * Crawl starting from `seedUrls` using parallel browser workers.
+ * Stops automatically when the topic is saturated.
  *
  * @param {import('playwright-core').Browser} browser
  * @param {string[]} seedUrls
  * @param {object}   [opts]
- * @param {number}   [opts.maxPages]
  * @param {number}   [opts.concurrency]
  * @param {boolean}  [opts.sameDomain]
  * @param {number}   [opts.navTimeout]
- * @param {Set<string>} [opts.skipUrls] – URLs to treat as already visited (e.g. from cache)
+ * @param {string}   [opts.keyword]
+ * @param {number}   [opts.saturationWindow]
+ * @param {number}   [opts.minRelevance]
+ * @param {number}   [opts.minNovelty]
+ * @param {number}   [opts.maxConsecutiveMisses]
+ * @param {number}   [opts.hardMaxPages]
+ * @param {Set<string>} [opts.skipUrls]
  * @returns {Promise<Array>}  array of RawPage objects
  */
 export async function crawl(browser, seedUrls, opts = {}) {
-    const maxPages    = opts.maxPages    ?? defaults.maxPages;
     const concurrency = opts.concurrency ?? defaults.concurrency;
     const sameDomain  = opts.sameDomain  ?? defaults.sameDomain;
     const navTimeout  = opts.navTimeout  ?? defaults.navTimeout;
     const skipUrls    = opts.skipUrls    ?? new Set();
+
+    const tracker = new SaturationTracker({
+        keyword:              opts.keyword              ?? defaults.keyword,
+        saturationWindow:     opts.saturationWindow     ?? defaults.saturationWindow,
+        minRelevance:         opts.minRelevance          ?? defaults.minRelevance,
+        minNovelty:           opts.minNovelty             ?? defaults.minNovelty,
+        maxConsecutiveMisses: opts.maxConsecutiveMisses   ?? defaults.maxConsecutiveMisses,
+        hardMaxPages:         opts.hardMaxPages           ?? defaults.hardMaxPages,
+    });
 
     const visited  = new Set(skipUrls);
     const inFlight = new Set();
@@ -42,23 +165,21 @@ export async function crawl(browser, seedUrls, opts = {}) {
     const queue    = [...queued].filter(u => !visited.has(u));
     const rawPages = [];
     let   activeWorkers = 0;
+    let   saturated = false;
+    let   stopReason = '';
 
     const startDomain = seedUrls.length > 0
         ? new URL(seedUrls[0]).hostname
         : '';
 
-    /**
-     * A single crawler worker — picks URLs off the shared queue and fetches them.
-     */
     const worker = async (id) => {
         const page = await browser.newPage();
         activeWorkers++;
 
-        while (visited.size < maxPages) {
+        while (!saturated) {
             const url = queue.shift();
 
             if (!url) {
-                // Wait briefly for other workers to enqueue links
                 if (activeWorkers <= 1) break;
                 await new Promise(r => setTimeout(r, 150));
                 continue;
@@ -66,41 +187,47 @@ export async function crawl(browser, seedUrls, opts = {}) {
 
             queued.delete(url);
             if (visited.has(url) || inFlight.has(url)) continue;
-            if (visited.size >= maxPages) break;
+            if (saturated) break;
 
             inFlight.add(url);
             visited.add(url);
-
-            console.log(`[Crawler W${id}] [${visited.size}/${maxPages}] ${url}`);
 
             try {
                 await page.goto(url, { waitUntil: 'domcontentloaded', timeout: navTimeout });
                 inFlight.delete(url);
 
-                // Capture full HTML + fallback body text
                 const html     = await page.content();
                 const bodyText = await page.evaluate(() => document.body?.innerText ?? '');
                 const title    = await page.title();
 
-                // Discover outbound links for the queue
                 const links = await page.$$eval('a[href]', anchors =>
                     anchors.map(a => a.href).filter(href => href.startsWith('http'))
                 );
 
                 rawPages.push({ url, title, html, bodyText, links });
 
+                // ── Saturation check (shared across all workers) ──
+                const { shouldContinue, reason, metrics } = tracker.record(bodyText);
+                console.log(
+                    `[Crawler W${id}] [${metrics.totalPages}] ${url}` +
+                    `  rel=${metrics.relevanceRate} nov=${metrics.novelty} miss=${metrics.consecutiveMisses}`
+                );
+                if (!shouldContinue) {
+                    saturated = true;
+                    stopReason = reason;
+                    break;
+                }
+
                 // Enqueue discovered links
                 for (const link of links) {
                     try {
                         const cleanLink  = link.split('#')[0];
                         const linkDomain = new URL(cleanLink).hostname;
-
                         if (
                             !visited.has(cleanLink) &&
                             !inFlight.has(cleanLink) &&
                             !queued.has(cleanLink) &&
-                            (!sameDomain || linkDomain === startDomain) &&
-                            visited.size + inFlight.size + queue.length < maxPages * 3
+                            (!sameDomain || linkDomain === startDomain)
                         ) {
                             queue.push(cleanLink);
                             queued.add(cleanLink);
@@ -124,5 +251,6 @@ export async function crawl(browser, seedUrls, opts = {}) {
     await Promise.all(workers);
 
     console.log(`[Crawler] Done – visited ${visited.size} page(s), captured ${rawPages.length} raw page(s).`);
+    if (stopReason) console.log(`[Crawler] Stop reason: ${stopReason}`);
     return rawPages;
 }

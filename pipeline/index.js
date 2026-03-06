@@ -19,7 +19,7 @@ export { crawl }                             from './crawler.js';
 export { cleanPage, cleanPages }             from './cleaner.js';
 export { chunkText, chunkPage, chunkPages }  from './chunker.js';
 export { embed }                             from './embedder.js';
-export { store, getExistingUrls }            from './store.js';
+export { store, getExistingUrls, getPageText } from './store.js';
 export * as config                           from './config.js';
 
 // ── Stage imports for the orchestrator ────────────────────

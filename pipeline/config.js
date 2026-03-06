@@ -14,14 +14,26 @@ export const seed = {
 
 // ── Crawler ───────────────────────────────────────────────
 export const crawler = {
-    /** Maximum total pages to visit across all workers */
-    maxPages:    parseInt(process.env.SCARK_MAX_PAGES, 10) || 20,
     /** Number of parallel browser tabs */
     concurrency: parseInt(process.env.SCARK_CONCURRENCY, 10) || 5,
     /** Stay on the same domain as the first seed? */
     sameDomain:  process.env.SCARK_SAME_DOMAIN === 'true',
     /** Navigation timeout per page (ms) */
     navTimeout:  parseInt(process.env.SCARK_NAV_TIMEOUT, 10) || 15000,
+
+    // ── Saturation settings ───────────────────────────────
+    /** Topic keyword for relevance scoring (inherited from seed) */
+    keyword:               seed.keyword,
+    /** Sliding window size for saturation metrics */
+    saturationWindow:      parseInt(process.env.SCARK_SAT_WINDOW, 10) || 10,
+    /** Min fraction of recent pages that must contain the keyword (0–1) */
+    minRelevance:          parseFloat(process.env.SCARK_MIN_RELEVANCE) || 0.3,
+    /** Min ratio of new-content shingles per page (0–1) */
+    minNovelty:            parseFloat(process.env.SCARK_MIN_NOVELTY) || 0.15,
+    /** Stop after N consecutive pages with zero keyword hits */
+    maxConsecutiveMisses:  parseInt(process.env.SCARK_MAX_MISSES, 10) || 5,
+    /** Absolute safety cap – never crawl more than this */
+    hardMaxPages:          parseInt(process.env.SCARK_HARD_MAX, 10) || 100,
 };
 
 // ── Cleaner ───────────────────────────────────────────────

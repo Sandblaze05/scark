@@ -10,7 +10,7 @@ let _db = null;
  *
  * Schema
  * ──────
- * pages  – one row per crawled page (metadata only, no raw text / vectors)
+ * pages  – one row per crawled page (metadata + full cleaned text)
  * chunks – one row per chunk; stores text + position reference but NOT the
  *          embedding (that lives in ChromaDB).  The id column mirrors the
  *          ChromaDB document id: "<url>::<chunk_index>"
@@ -30,7 +30,8 @@ function getDb() {
             word_count      INTEGER,
             chunk_count     INTEGER,
             keyword_density REAL,
-            timestamp       TEXT
+            timestamp       TEXT,
+            cleaned_text    TEXT
         );
 
         CREATE TABLE IF NOT EXISTS chunks (
@@ -64,9 +65,9 @@ export function storeInSQLite(results) {
 
     const upsertPage = db.prepare(`
         INSERT OR REPLACE INTO pages
-            (url, title, domain, word_count, chunk_count, keyword_density, timestamp)
+            (url, title, domain, word_count, chunk_count, keyword_density, timestamp, cleaned_text)
         VALUES
-            (@url, @title, @domain, @word_count, @chunk_count, @keyword_density, @timestamp)
+            (@url, @title, @domain, @word_count, @chunk_count, @keyword_density, @timestamp, @cleaned_text)
     `);
 
     const upsertChunk = db.prepare(`
@@ -88,6 +89,7 @@ export function storeInSQLite(results) {
                 chunk_count:     result.metadata.chunk_count,
                 keyword_density: result.metadata.keyword_density,
                 timestamp:       result.metadata.timestamp,
+                cleaned_text:    result.cleanedText ?? null,
             });
 
             for (const chunk of result.chunks) {
@@ -143,4 +145,17 @@ export function getChunksByUrl(url) {
 export function getExistingUrls() {
     const rows = getDb().prepare('SELECT url FROM pages').all();
     return new Set(rows.map(r => r.url));
+}
+
+/**
+ * Retrieve the full cleaned text for a page, given any chunk id or URL.
+ *
+ * @param {string} idOrUrl – a ChromaDB chunk id ("<url>::<chunk_index>") or a page URL
+ * @returns {{ url: string, title: string, cleaned_text: string } | undefined}
+ */
+export function getPageText(idOrUrl) {
+    const url = idOrUrl.includes('::') ? idOrUrl.split('::')[0] : idOrUrl;
+    return getDb()
+        .prepare('SELECT url, title, cleaned_text FROM pages WHERE url = ?')
+        .get(url);
 }
