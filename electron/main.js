@@ -33,6 +33,8 @@ function createWindow() {
         },
     });
 
+    mainWindow.setMenuBarVisibility(false)
+
     if (isDev) {
         mainWindow.loadURL(DEV_URL);
         mainWindow.webContents.openDevTools();

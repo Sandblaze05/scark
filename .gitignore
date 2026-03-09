@@ -1,5 +1,12 @@
 
 check-stores.js
+chroma-data/
+scark.db
+
+# next
+renderer/.next/
+renderer/out/
+
 
 # Playwright
 node_modules/
