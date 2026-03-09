@@ -1,15 +1,21 @@
 import React from 'react'
 import { User } from 'lucide-react'
+import Chat from './Chat'
 
 const ChatArea = () => {
   return (
-    <div className="flex flex-col items-start px-4 py-2 w-full h-full bg-[#080b11]">
-      <div className='flex items-center justify-between w-full'>
+    <div className="flex flex-col items-start px-4 pt-2 pb-10 w-full h-full gap-3">
+      <header className='flex items-center justify-between w-full px-2 py-1'>
         <h1 className=' text-3xl'>Scark</h1>
         <div className='flex items-center justify-center '>
-          <User className='fill-white bg-linear-130 from-blue-500 to-blue-100  w-8 h-8 rounded-full border-2 border-white' />
+          <span className=' rounded-full border-0 border-white overflow-hidden w-8 h-8 flex items-center justify-center bg-linear-130 from-gray-700 via-gray-500 to-gray-100'>
+            <User className='fill-white w-6 h-6' />
+          </span>
         </div>
-      </div>
+      </header>
+
+      <Chat />
+
     </div>
   )
 }

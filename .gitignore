@@ -2,9 +2,12 @@
 check-stores.js
 chroma-data/
 scark.db
+dist/
 
 # next
+.next/
 renderer/.next/
+renderer/.next
 renderer/out/
 
 

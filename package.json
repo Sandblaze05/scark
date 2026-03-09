@@ -20,14 +20,15 @@
     "@playwright/test": "^1.58.2",
     "@types/node": "^25.3.3",
     "concurrently": "^9.1.0",
-    "electron": "^34.0.0",
-    "electron-builder": "^25.1.0"
+    "electron": "^40.8.0",
+    "electron-builder": "^26.8.1"
   },
   "dependencies": {
     "@mozilla/readability": "^0.6.0",
     "@tailwindcss/postcss": "^4.2.1",
     "better-sqlite3": "^12.6.2",
     "chromadb": "^3.3.1",
+    "gsap": "^3.14.2",
     "jsdom": "^28.1.0",
     "lucide-react": "^0.577.0",
     "next": "^16.1.6",
