@@ -45,8 +45,31 @@ export function normalise(raw) {
 }
 
 /**
- * Count occurrences of `keyword` (case-insensitive) in `text`
- * and return density as a percentage of total words.
+ * Split a keyword query into individual tokens for matching.
+ * Filters out very short stopwords so "usa" is kept but "a" is not.
+ */
+function keywordTokens(keyword) {
+    return keyword
+        .toLowerCase()
+        .split(/\s+/)
+        .filter(w => w.length >= 2);
+}
+
+/**
+ * Check whether `text` contains enough of the keyword tokens.
+ * Returns true when at least half of the individual keyword words appear.
+ */
+export function keywordMatch(text, keyword) {
+    const tokens = keywordTokens(keyword);
+    if (tokens.length === 0) return true;
+    const lower = text.toLowerCase();
+    const hits = tokens.filter(t => lower.includes(t)).length;
+    return hits >= Math.ceil(tokens.length / 2);
+}
+
+/**
+ * Count occurrences of each keyword token (case-insensitive) in `text`
+ * and return aggregate density as a percentage of total words.
  *
  * @param {string} text
  * @param {string} keyword
@@ -54,13 +77,16 @@ export function normalise(raw) {
  */
 export function keywordStats(text, keyword) {
     const lower = text.toLowerCase();
-    const kw    = keyword.toLowerCase();
+    const tokens = keywordTokens(keyword);
     const words = text.split(/\s+/).filter(Boolean).length;
 
-    let count = 0, idx = 0;
-    while ((idx = lower.indexOf(kw, idx)) !== -1) {
-        count++;
-        idx += kw.length;
+    let count = 0;
+    for (const t of tokens) {
+        let idx = 0;
+        while ((idx = lower.indexOf(t, idx)) !== -1) {
+            count++;
+            idx += t.length;
+        }
     }
 
     const density = words > 0
@@ -86,8 +112,8 @@ export function cleanPage(rawPage, opts = {}) {
     const wordCount   = cleanedText.split(/\s+/).filter(Boolean).length;
     const domain      = new URL(rawPage.url).hostname;
 
-    // Keyword filter
-    if (keyword && !cleanedText.toLowerCase().includes(keyword.toLowerCase())) {
+    // Keyword filter — check individual words, not exact phrase
+    if (keyword && !keywordMatch(cleanedText, keyword)) {
         return null;
     }
 

@@ -4,7 +4,7 @@ import Chat from './Chat'
 
 const ChatArea = () => {
   return (
-    <div className="flex flex-col items-start px-4 pt-2 pb-10 w-full h-full gap-3">
+    <div className="flex flex-col px-4 pt-2 w-full max-w-[80svw] h-full gap-3 overflow-x-hidden">
       <header className='flex items-center justify-between w-full px-2 py-1'>
         <h1 className=' text-3xl'>Scark</h1>
         <div className='flex items-center justify-center '>

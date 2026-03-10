@@ -1,8 +1,16 @@
 const OLLAMA_BASE_URL = process.env.OLLAMA_URL || 'http://localhost:11434';
 const EMBED_MODEL = process.env.EMBED_MODEL || 'nomic-embed-text';
 const BATCH_SIZE = 32; // max texts per Ollama request
+const MAX_EMBED_WORDS = 2000; // safe limit for nomic-embed-text context window
 
 import fs from 'fs';
+
+/** Truncate text to MAX_EMBED_WORDS to avoid exceeding model context length. */
+function truncateForEmbed(text) {
+    const words = text.split(/\s+/);
+    if (words.length <= MAX_EMBED_WORDS) return text;
+    return words.slice(0, MAX_EMBED_WORDS).join(' ');
+}
 
 /**
  * Generate an embedding for a single text via Ollama.
@@ -11,7 +19,7 @@ export async function embedText(text) {
     const res = await fetch(`${OLLAMA_BASE_URL}/api/embed`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model: EMBED_MODEL, input: text }),
+        body: JSON.stringify({ model: EMBED_MODEL, input: truncateForEmbed(text) }),
     });
     if (!res.ok) {
         const body = await res.text();
@@ -27,7 +35,7 @@ export async function embedText(text) {
 async function embedBatch(texts) {
     const embeddings = [];
     for (let i = 0; i < texts.length; i += BATCH_SIZE) {
-        const batch = texts.slice(i, i + BATCH_SIZE);
+        const batch = texts.slice(i, i + BATCH_SIZE).map(truncateForEmbed);
         const res = await fetch(`${OLLAMA_BASE_URL}/api/embed`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },

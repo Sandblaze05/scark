@@ -10,6 +10,7 @@ import { app, BrowserWindow, ipcMain } from 'electron';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { WorkerPool } from '../workers/pool.js';
+import { buildSystemPrompt, streamChat, rewriteQuery } from '../services/chatService.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const isDev = !app.isPackaged;
@@ -86,9 +87,143 @@ function registerIPC() {
         return queryPool.exec({ type: 'queryChroma', data: { query, topK } });
     });
 
-    // Query: in-memory search over results.json
-    ipcMain.handle('query:local', (_event, query, topK) => {
-        return queryPool.exec({ type: 'localSearch', data: { query, topK } });
+    // Chat: RAG → stream LLM response
+    // mode: 'ask' (lightweight) or 'research' (full pipeline when needed)
+    ipcMain.handle('query:chat', async (event, { messages, topK, mode }) => {
+        const RELEVANCE_THRESHOLD = 0.45;
+        const MIN_CHUNKS = 2;
+
+        try {
+            const lastUserMsg = [...messages].reverse().find(m => m.role === 'user');
+            if (!lastUserMsg) throw new Error('No user message found');
+
+            const k = topK || 5;
+
+            // 0. Rewrite query: resolve pronouns/context from conversation history
+            event.sender.send('chat:status', 'Understanding your question…');
+            const searchQuery = await rewriteQuery(messages);
+            console.log(`[Chat] Search query: "${searchQuery}"`);
+
+            // 1. Try retrieving context from existing RAG store
+            event.sender.send('chat:status', 'Checking existing knowledge…');
+            let contextChunks = [];
+            try {
+                contextChunks = await queryPool.exec({
+                    type: 'retrieveContext',
+                    data: { query: searchQuery, topK: k },
+                }) ?? [];
+                console.log(`[Chat] ChromaDB retrieval returned ${contextChunks.length} chunk(s)`);
+                if (contextChunks.length > 0) {
+                    const best = contextChunks[0].distance;
+                    const worst = contextChunks[contextChunks.length - 1].distance;
+                    console.log(`[Chat] Distance range: ${best?.toFixed(4)} – ${worst?.toFixed(4)} (threshold ${RELEVANCE_THRESHOLD})`);
+                }
+            } catch (retrieveErr) {
+                console.warn('[Chat] ChromaDB retrieval failed:', retrieveErr.message);
+            }
+
+            // 2. Filter to relevant chunks
+            const relevant = contextChunks.filter(
+                c => c.distance != null && c.distance < RELEVANCE_THRESHOLD,
+            );
+
+            // 3. In 'research' mode, run full pipeline if context is insufficient
+            if (mode === 'research') {
+                const needsFreshData = relevant.length < MIN_CHUNKS;
+
+                if (needsFreshData) {
+                    console.log(
+                        `[Chat] Only ${relevant.length}/${contextChunks.length} chunk(s) below threshold ${RELEVANCE_THRESHOLD} — running pipeline`,
+                    );
+                    event.sender.send('chat:status', 'Searching & scraping the web…');
+                    const pipelineResult = await ingestionPool.exec({
+                        type: 'runPipeline',
+                        data: { opts: { seed: { keyword: searchQuery } } },
+                    });
+                    console.log('[Chat] Pipeline done:', pipelineResult?.stats);
+
+                    // Re-retrieve after fresh ingestion
+                    event.sender.send('chat:status', 'Retrieving context…');
+                    try {
+                        const freshChunks = await queryPool.exec({
+                            type: 'retrieveContext',
+                            data: { query: searchQuery, topK: k },
+                        }) ?? [];
+                        const freshRelevant = freshChunks.filter(
+                            c => c.distance != null && c.distance < RELEVANCE_THRESHOLD,
+                        );
+                        if (freshRelevant.length > relevant.length) {
+                            contextChunks = freshChunks;
+                        }
+                    } catch (err) {
+                        console.warn('[Chat] Post-pipeline retrieval failed:', err.message);
+                    }
+                } else {
+                    console.log(
+                        `[Chat] ${relevant.length} relevant chunk(s) found in existing store — skipping pipeline`,
+                    );
+                }
+            } else {
+                // 'ask' mode — use existing relevant context, or do a quick web search
+                if (relevant.length >= MIN_CHUNKS) {
+                    contextChunks = relevant;
+                    console.log(`[Chat][Ask] Using ${relevant.length} relevant chunk(s) from existing store`);
+                } else {
+                    console.log(`[Chat][Ask] Insufficient local context (${relevant.length}) — running quick web search`);
+                    event.sender.send('chat:status', 'Searching the web…');
+                    try {
+                        const webResults = await ingestionPool.exec({
+                            type: 'quickSearch',
+                            data: { keyword: searchQuery, maxPages: 3 },
+                        });
+                        console.log(`[Chat][Ask] Quick search returned ${webResults.length} page(s)`);
+                        contextChunks = webResults.map(p => ({
+                            id: p.url,
+                            title: p.title,
+                            url: p.url,
+                            text: p.text,
+                            distance: null,
+                        }));
+                    } catch (err) {
+                        console.warn('[Chat][Ask] Quick search failed:', err.message);
+                        contextChunks = relevant;
+                    }
+                }
+            }
+
+            console.log(`[Chat] Using ${contextChunks.length} context chunks for LLM`);
+            if (contextChunks.length > 0) {
+                contextChunks.forEach((c, i) => {
+                    console.log(`  [${i + 1}] ${c.title} (${c.text?.length ?? 0} chars, dist: ${c.distance})`);
+                });
+            } else {
+                console.warn('[Chat] WARNING: No context found — model will answer without sources');
+            }
+
+            // 4. Build messages with context-aware system prompt
+            event.sender.send('chat:status', '');
+            const systemPrompt = buildSystemPrompt(contextChunks);
+            const fullMessages = [
+                { role: 'system', content: systemPrompt },
+                ...messages,
+            ];
+
+            // 5. Stream tokens from LLM via Ollama
+            for await (const token of streamChat(fullMessages)) {
+                event.sender.send('chat:token', token);
+            }
+
+            event.sender.send('chat:done');
+
+            return {
+                success: true,
+                sources: contextChunks.map(c => ({ title: c.title, url: c.url })),
+            };
+        } catch (err) {
+            console.error('[Chat] Error:', err.message);
+            event.sender.send('chat:error', err.message);
+            return { success: false, error: err.message };
+        }
     });
 
     // Worker pool stats

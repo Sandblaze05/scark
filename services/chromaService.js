@@ -109,3 +109,11 @@ export async function queryChroma(queryEmbedding, topK = 5) {
         include:         ['documents', 'metadatas', 'distances'],
     });
 }
+
+/**
+ * Return the number of documents currently in the collection.
+ */
+export async function collectionCount() {
+    const col = await getCollection();
+    return col.count();
+}

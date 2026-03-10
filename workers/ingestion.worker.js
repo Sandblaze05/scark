@@ -93,6 +93,37 @@ const handlers = {
     async store({ embeddedPages }) {
         return await store(embeddedPages);
     },
+
+    /**
+     * Lightweight web search for Ask mode:
+     * seed search (few URLs) → crawl just those pages → clean → return text.
+     * No chunking, embedding, or storage.
+     */
+    async quickSearch({ keyword, maxPages }) {
+        const max = maxPages || 3;
+        const browser = await chromium.launch({ headless: true });
+        try {
+            const seedUrls = await seedSearch(browser, { keyword, count: max });
+            if (seedUrls.length === 0) return [];
+
+            const rawPages = await crawl(browser, seedUrls, {
+                concurrency: 2,
+                hardMaxPages: max,
+                maxConsecutiveMisses: max,
+                keyword,
+            });
+
+            const cleaned = cleanPages(rawPages, { keyword: '' });
+
+            return cleaned.map(p => ({
+                title: p.title,
+                url: p.url,
+                text: p.cleanedText.slice(0, 3000),
+            }));
+        } finally {
+            await browser.close();
+        }
+    },
 };
 
 // ── Message loop ──────────────────────────────────────────

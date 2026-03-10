@@ -19,9 +19,39 @@ contextBridge.exposeInMainWorld('scark', {
     query: {
         /** Embed query + search ChromaDB for top-k similar chunks */
         search: (query, topK) => ipcRenderer.invoke('query:search', query, topK),
+    },
 
-        /** In-memory search over results.json embeddings */
-        local: (query, topK) => ipcRenderer.invoke('query:local', query, topK),
+    chat: {
+        /** Start a RAG chat: retrieve context + stream LLM response */
+        send: (data) => ipcRenderer.invoke('query:chat', data),
+
+        /** Register a callback for each streamed token */
+        onToken: (cb) => {
+            const handler = (_e, token) => cb(token);
+            ipcRenderer.on('chat:token', handler);
+            return () => ipcRenderer.removeListener('chat:token', handler);
+        },
+
+        /** Register a callback for stream completion */
+        onDone: (cb) => {
+            const handler = () => cb();
+            ipcRenderer.on('chat:done', handler);
+            return () => ipcRenderer.removeListener('chat:done', handler);
+        },
+
+        /** Register a callback for stream errors */
+        onError: (cb) => {
+            const handler = (_e, error) => cb(error);
+            ipcRenderer.on('chat:error', handler);
+            return () => ipcRenderer.removeListener('chat:error', handler);
+        },
+
+        /** Register a callback for status updates (pipeline progress) */
+        onStatus: (cb) => {
+            const handler = (_e, status) => cb(status);
+            ipcRenderer.on('chat:status', handler);
+            return () => ipcRenderer.removeListener('chat:status', handler);
+        },
     },
 
     pool: {

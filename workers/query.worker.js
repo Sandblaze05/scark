@@ -5,13 +5,14 @@
  * Handles embedding a query and searching for similar chunks.
  *
  * Supported task types:
- *   queryChroma  – embed query string → search ChromaDB (vector store)
- *   localSearch  – embed query string → in-memory cosine search over results.json
+ *   queryChroma     – embed query string → search ChromaDB (vector store)
+ *   retrieveContext – embed query → ChromaDB → SQLite → context objects for LLM
  */
 
 import { parentPort } from 'worker_threads';
-import { embedText, search as localSearch } from '../services/embedService.js';
-import { queryChroma } from '../services/chromaService.js';
+import { embedText } from '../services/embedService.js';
+import { queryChroma as searchChroma } from '../services/chromaService.js';
+import { getChunkById, getPageText } from '../services/sqliteService.js';
 
 const handlers = {
     /**
@@ -19,16 +20,41 @@ const handlers = {
      */
     async queryChroma({ query, topK = 5 }) {
         const queryVec = await embedText(query);
-        const results = await queryChroma(queryVec, topK);
+        const results = await searchChroma(queryVec, topK);
         return results;
     },
 
     /**
-     * In-memory cosine-similarity search over embeddings in results.json.
+     * Retrieve context for RAG: embed query → search ChromaDB → fetch
+     * chunk text from SQLite.  Returns an array of context objects the
+     * main process can feed into the LLM system prompt.
      */
-    async localSearch({ query, topK = 5 }) {
-        return await localSearch(query, topK);
+    async retrieveContext({ query, topK = 5 }) {
+        const queryVec = await embedText(query);
+        console.log(`[QueryWorker] Querying ChromaDB (topK=${topK}, vecLen=${queryVec?.length})`);
+        const chromaResults = await searchChroma(queryVec, topK);
+
+        const contextChunks = [];
+        const ids = chromaResults?.ids?.[0] ?? [];
+        console.log(`[QueryWorker] ChromaDB returned ${ids.length} result(s)`);
+
+        for (let i = 0; i < ids.length; i++) {
+            const id = ids[i];
+            const chunk = getChunkById(id);
+            const page = getPageText(id);
+
+            contextChunks.push({
+                id,
+                title:    page?.title ?? '',
+                url:      page?.url ?? id.split('::')[0],
+                text:     chunk?.text ?? chromaResults.documents[0][i] ?? '',
+                distance: chromaResults.distances?.[0]?.[i] ?? null,
+            });
+        }
+
+        return contextChunks;
     },
+
 };
 
 parentPort.on('message', async ({ taskId, type, data }) => {

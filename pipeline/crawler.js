@@ -28,6 +28,7 @@ import { crawler as defaults } from './config.js';
 
 class SaturationTracker {
     #keyword;
+    #keywordTokens;
     #window;          // sliding-window size
     #minRelevance;
     #minNovelty;
@@ -48,6 +49,19 @@ class SaturationTracker {
         this.#maxMisses     = opts.maxConsecutiveMisses   ?? 5;
         this.#hardMax       = opts.hardMaxPages           ?? 100;
         this.#relevanceRing = new Array(this.#window).fill(-1); // -1 = unfilled
+
+        // Pre-split keyword into tokens for individual word matching
+        this.#keywordTokens = this.#keyword
+            .split(/\s+/)
+            .filter(w => w.length >= 2);
+    }
+
+    /** Check if text contains at least half of the keyword tokens */
+    #matchesKeyword(text) {
+        if (this.#keywordTokens.length === 0) return true;
+        const lower = text.toLowerCase();
+        const hits = this.#keywordTokens.filter(t => lower.includes(t)).length;
+        return hits >= Math.ceil(this.#keywordTokens.length / 2);
     }
 
     /** Generate word-trigram shingles from text */
@@ -69,7 +83,7 @@ class SaturationTracker {
 
         // ── Keyword relevance ─────────────────────────────
         const hasKeyword = this.#keyword
-            ? bodyText.toLowerCase().includes(this.#keyword)
+            ? this.#matchesKeyword(bodyText)
             : true;  // no keyword → every page counts as relevant
 
         this.#relevanceRing[this.#ringIdx % this.#window] = hasKeyword ? 1 : 0;

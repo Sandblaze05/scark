@@ -49,6 +49,9 @@ export async function runPipeline(browser, opts = {}) {
         return { pages: [], stats: {} };
     }
 
+    // The user's query keyword must flow through to every stage that uses it
+    const keyword = opts.seed?.keyword;
+
     // ── 2. Load cache (skip already-stored URLs) ──────────
     const cachedUrls = getExistingUrls();
     if (cachedUrls.size > 0) {
@@ -58,11 +61,15 @@ export async function runPipeline(browser, opts = {}) {
     // ── 3. Crawl ──────────────────────────────────────────
     const rawPages = await crawl(browser, seedUrls, {
         ...opts.crawler,
+        ...(keyword ? { keyword } : {}),
         skipUrls: cachedUrls,
     });
 
     // ── 4. Clean ──────────────────────────────────────────
-    const cleanedPages = cleanPages(rawPages, opts.cleaner);
+    const cleanedPages = cleanPages(rawPages, {
+        ...opts.cleaner,
+        ...(keyword ? { keyword } : {}),
+    });
 
     // ── 5. Chunk ──────────────────────────────────────────
     const chunkedPages = chunkPages(cleanedPages, opts.chunker);
