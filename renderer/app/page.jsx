@@ -5,7 +5,7 @@ import ChatArea from "../components/ChatArea";
 
 export default function Home() {
   return (
-    <div className="bg-[#080b11] w-svw h-svh text-white flex overflow-x-hidden">
+    <div className="bg-background w-svw h-svh text-foreground flex overflow-x-hidden transition-colors duration-300">
       <Navbar />
       <ChatArea />
     </div>
