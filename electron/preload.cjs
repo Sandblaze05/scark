@@ -31,6 +31,36 @@ contextBridge.exposeInMainWorld('scark', {
     },
 
     chat: {
+        /** List chat sessions (auto-creates one if empty) */
+        list: () => ipcRenderer.invoke('chat:list'),
+
+        /** Create a fresh chat session */
+        create: (payload) => ipcRenderer.invoke('chat:create', payload),
+
+        /** Load one chat with its messages */
+        get: (chatId) => ipcRenderer.invoke('chat:get', chatId),
+
+        /** Rename a chat session */
+        rename: (chatId, title) => ipcRenderer.invoke('chat:rename', chatId, title),
+
+        /** Pin or unpin a chat session */
+        pin: (chatId, isPinned) => ipcRenderer.invoke('chat:pin', chatId, isPinned),
+
+        /** Delete a chat session */
+        remove: (chatId) => ipcRenderer.invoke('chat:delete', chatId),
+
+        /** Persist one chat message */
+        addMessage: (payload) => ipcRenderer.invoke('chat:addMessage', payload),
+
+        /** Persist rolling chat summary */
+        setSummary: (chatId, summary) => ipcRenderer.invoke('chat:setSummary', chatId, summary),
+
+        /** Touch chat last-active timestamp */
+        touch: (chatId) => ipcRenderer.invoke('chat:touch', chatId),
+
+        /** Select an existing chat session */
+        select: (chatId) => ipcRenderer.send('chat:select', chatId),
+
         /**
          * Retrieve RAG context for the conversation.
          * Returns { success, systemPrompt, sources }.
@@ -60,6 +90,20 @@ contextBridge.exposeInMainWorld('scark', {
             const handler = () => cb();
             ipcRenderer.on('chat:new', handler);
             return () => ipcRenderer.removeListener('chat:new', handler);
+        },
+
+        /** Register a callback for selected chat changes */
+        onSelected: (cb) => {
+            const handler = (_e, chatId) => cb(chatId);
+            ipcRenderer.on('chat:selected', handler);
+            return () => ipcRenderer.removeListener('chat:selected', handler);
+        },
+
+        /** Register a callback for chat list updates */
+        onListUpdated: (cb) => {
+            const handler = (_e, chats) => cb(chats);
+            ipcRenderer.on('chat:list-updated', handler);
+            return () => ipcRenderer.removeListener('chat:list-updated', handler);
         },
     },
 

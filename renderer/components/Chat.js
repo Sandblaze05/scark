@@ -30,7 +30,7 @@ import remarkExternalLinks from 'remark-external-links'
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism'
 import { Copy, Check } from 'lucide-react'
-import { initEngine, streamChat as webllmStreamChat, isEngineReady, DEFAULT_MODEL, planActions } from '../lib/webllm'
+import { initEngine, streamChat as webllmStreamChat, complete as webllmComplete, DEFAULT_MODEL, planActions, decideAskPageCap } from '../lib/webllm'
 
 const CodeBlock = React.memo(function CodeBlock({ language, value }) {
   const [copied, setCopied] = useState(false)
@@ -175,6 +175,23 @@ function SoundWave({ levels }) {
 }
 
 export default function Chat() {
+  const ASK_ROADMAP = [
+    { id: 'plan', label: 'Plan actions', status: 'pending', note: '' },
+    { id: 'retrieve', label: 'Retrieve docs', status: 'pending', note: '' },
+    { id: 'draft', label: 'Reason draft (x3)', status: 'pending', note: '' },
+    { id: 'reflect', label: 'Reflection pass', status: 'pending', note: '' },
+    { id: 'final', label: 'Final answer', status: 'pending', note: '' },
+  ]
+
+  const RESEARCH_ROADMAP = [
+    { id: 'plan', label: 'Plan actions', status: 'pending', note: '' },
+    { id: 'retrieve', label: 'Retrieve many docs', status: 'pending', note: '' },
+    { id: 'summarize', label: 'Summarize docs', status: 'pending', note: '' },
+    { id: 'reason', label: 'Reason (x3)', status: 'pending', note: '' },
+    { id: 'reflect', label: 'Reflection pass', status: 'pending', note: '' },
+    { id: 'expand', label: 'Expand answer', status: 'pending', note: '' },
+  ]
+
   const [value, setValue] = useState("")
   const [attachments, setAttachments] = useState([])
   const [isTyping, setIsTyping] = useState(false)
@@ -435,9 +452,15 @@ export default function Chat() {
   const [messages, setMessages] = useState([])
   const [queuedMessage, setQueuedMessage] = useState(null)
   const [streamingContent, setStreamingContent] = useState('')
+  const [streamingReasoningPreview, setStreamingReasoningPreview] = useState('')
   const [status, setStatus] = useState('')
   const [sources, setSources] = useState([])
   const [mode, setMode] = useState('ask') // 'ask' or 'research'
+  const [agentRoadmap, setAgentRoadmap] = useState(null)
+  const [activeChatId, setActiveChatId] = useState(null)
+  const [activeChatTitle, setActiveChatTitle] = useState('New chat')
+  const [chatSummary, setChatSummary] = useState('')
+  const streamBufferRef = useRef('')
 
   const commandSuggestions = [
     { icon: <Search className="w-4 h-4" />, label: "Ask", description: "Quick answers with LLM", prefix: "/ask" },
@@ -520,9 +543,103 @@ export default function Chat() {
     }
   }, [messages, streamingContent, isTyping])
 
-  // IPC Streaming Listeners
-  // IPC listeners – only context-retrieval status/errors/new-chat signals now.
-  // Token streaming is handled locally by WebLLM.
+  const resetTransientState = useCallback(() => {
+    if (webllmAbortRef.current) {
+      webllmAbortRef.current.abort()
+      webllmAbortRef.current = null
+    }
+    setQueuedMessage(null)
+    setStreamingContent('')
+    setStreamingReasoningPreview('')
+    setStatus('')
+    setSources([])
+    setIsTyping(false)
+    setValue('')
+    setAttachments([])
+    setAgentRoadmap(null)
+    streamBufferRef.current = ''
+  }, [])
+
+  const loadChatSession = useCallback(async (chatId) => {
+    if (!chatId || !window.scark?.chat?.get) return
+    const session = await window.scark.chat.get(chatId)
+    if (!session) return
+
+    resetTransientState()
+    setActiveChatId(session.id)
+    setActiveChatTitle(session.title || 'New chat')
+    setChatSummary(session.summary || '')
+    setMessages((session.messages || []).map(m => ({
+      role: m.role,
+      content: m.content,
+      reasoningPreview: m.reasoningPreview || '',
+    })))
+  }, [resetTransientState])
+
+  const ensureActiveChat = useCallback(async () => {
+    if (activeChatId) return { id: activeChatId, title: activeChatTitle }
+    const created = await window.scark?.chat?.create?.({ title: 'New chat', select: false })
+    if (!created?.id) throw new Error('Failed to create chat')
+    setActiveChatId(created.id)
+    setActiveChatTitle(created.title || 'New chat')
+    setChatSummary('')
+    return { id: created.id, title: created.title || 'New chat' }
+  }, [activeChatId, activeChatTitle])
+
+  const maybeGenerateChatTitle = useCallback(async (chatId, currentTitle, firstUserQuery) => {
+    if (!chatId || !firstUserQuery || (currentTitle && currentTitle !== 'New chat')) return
+    try {
+      const raw = await webllmComplete([
+        {
+          role: 'system',
+          content:
+            'Generate a concise chat title based on the user query. ' +
+            'Return only the title, 3-7 words, no quotes, no markdown, no trailing punctuation.',
+        },
+        { role: 'user', content: firstUserQuery },
+      ], { maxTokens: 20 })
+
+      const title = (raw || '')
+        .split('\n')[0]
+        .replace(/^"|"$/g, '')
+        .trim()
+        .slice(0, 80)
+
+      if (!title) return
+      await window.scark?.chat?.rename?.(chatId, title)
+      setActiveChatTitle(title)
+    } catch (e) {
+      console.warn('[Chat] Title generation failed:', e?.message || e)
+    }
+  }, [])
+
+  const updateRollingSummary = useCallback(async (chatId, userText, assistantText) => {
+    if (!chatId || !assistantText) return
+    try {
+      const nextSummary = await webllmComplete([
+        {
+          role: 'system',
+          content:
+            'Maintain a rolling summary for a chat. Keep it under 120 words. ' +
+            'Capture goals, key facts, decisions, and open items. Return plain text only.',
+        },
+        {
+          role: 'user',
+          content:
+            `Current summary:\n${chatSummary || '(none)'}\n\nLatest user message:\n${userText}\n\nLatest assistant message:\n${assistantText}`,
+        },
+      ], { maxTokens: 170 })
+
+      const summary = (nextSummary || '').trim()
+      if (!summary) return
+      await window.scark?.chat?.setSummary?.(chatId, summary)
+      setChatSummary(summary)
+    } catch (e) {
+      console.warn('[Chat] Summary update failed:', e?.message || e)
+    }
+  }, [chatSummary])
+
+  // IPC listeners – context status/errors and chat selection updates.
   useEffect(() => {
     if (typeof window === 'undefined' || !window.scark?.chat) return
 
@@ -534,24 +651,22 @@ export default function Chat() {
     })
     const removeStatus = window.scark.chat.onStatus(text => setStatus(text))
 
-    // Clear chat state on new-chat signal (e.g. from Navbar)
-    const removeNew = window.scark.chat.onNew(() => {
-      if (webllmAbortRef.current) {
-        webllmAbortRef.current.abort()
-        webllmAbortRef.current = null
-      }
-      setMessages([])
-      setQueuedMessage(null)
-      setStreamingContent('')
-      setStatus('')
-      setSources([])
-      setIsTyping(false)
-      setValue('')
-      setAttachments([])
+    const removeSelected = window.scark.chat.onSelected((chatId) => {
+      loadChatSession(chatId)
     })
 
-    return () => { removeError(); removeStatus(); removeNew() }
-  }, [])
+    const init = async () => {
+      const chats = await window.scark.chat.list()
+      if ((chats ?? []).length > 0) {
+        const first = chats[0].id
+        await loadChatSession(first)
+        window.scark.chat.select(first)
+      }
+    }
+    init()
+
+    return () => { removeError(); removeStatus(); if (removeSelected) removeSelected() }
+  }, [loadChatSession, resetTransientState])
 
   useEffect(() => {
     if (!isTyping && queuedMessage) {
@@ -561,169 +676,391 @@ export default function Chat() {
     }
   }, [isTyping, queuedMessage, messages])
 
+  const initializeRoadmap = useCallback((queryMode) => {
+    const base = queryMode === 'research' ? RESEARCH_ROADMAP : ASK_ROADMAP
+    setAgentRoadmap(base.map(step => ({ ...step })))
+  }, [ASK_ROADMAP, RESEARCH_ROADMAP])
+
+  const setRoadmapStep = useCallback((stepId, status, note = '') => {
+    setAgentRoadmap(prev => {
+      if (!prev) return prev
+      return prev.map(step => step.id === stepId ? { ...step, status, note: note || step.note } : step)
+    })
+  }, [])
+
+  const throwIfAborted = useCallback((abortCtrl) => {
+    if (abortCtrl?.signal?.aborted) {
+      const abortErr = new Error('Aborted')
+      abortErr.name = 'AbortError'
+      throw abortErr
+    }
+  }, [])
+
+  const awaitWithAbort = useCallback((promise, abortCtrl, timeoutMs = 12000) => {
+    return new Promise((resolve, reject) => {
+      let done = false
+      const timer = setTimeout(() => {
+        if (done) return
+        done = true
+        const timeoutErr = new Error('Timed out')
+        timeoutErr.name = 'TimeoutError'
+        reject(timeoutErr)
+      }, timeoutMs)
+
+      const onAbort = () => {
+        if (done) return
+        done = true
+        clearTimeout(timer)
+        const abortErr = new Error('Aborted')
+        abortErr.name = 'AbortError'
+        reject(abortErr)
+      }
+
+      if (abortCtrl?.signal?.aborted) {
+        onAbort()
+        return
+      }
+
+      abortCtrl?.signal?.addEventListener('abort', onAbort, { once: true })
+
+      Promise.resolve(promise)
+        .then(result => {
+          if (done) return
+          done = true
+          clearTimeout(timer)
+          abortCtrl?.signal?.removeEventListener('abort', onAbort)
+          resolve(result)
+        })
+        .catch(err => {
+          if (done) return
+          done = true
+          clearTimeout(timer)
+          abortCtrl?.signal?.removeEventListener('abort', onAbort)
+          reject(err)
+        })
+    })
+  }, [])
+
+  const summarizeActions = useCallback((actions) => {
+    if (!actions.length) return 'No external tools needed'
+    return actions.map((a, idx) => {
+      const arg = a.args?.query || a.args?.url || ''
+      return `${idx + 1}. ${a.tool}${arg ? ` -> ${arg}` : ''}`
+    }).join('\n')
+  }, [])
+
+  const runPlannedTools = useCallback(async (actions, queryMode, abortCtrl, askPageCap = 2) => {
+    const gathered = []
+    const maxActions = queryMode === 'research' ? 6 : 3
+    const cappedActions = actions.slice(0, maxActions)
+
+    // Ask mode prioritizes responsiveness over exhaustive retrieval.
+    const normalizedActions = queryMode === 'ask'
+      ? cappedActions.filter((a, idx) => {
+          if (a.tool !== 'web_search') return true
+          const firstWebIdx = cappedActions.findIndex(x => x.tool === 'web_search')
+          return idx === firstWebIdx
+        })
+      : cappedActions
+
+    for (let i = 0; i < normalizedActions.length; i++) {
+      const action = normalizedActions[i]
+      throwIfAborted(abortCtrl)
+      setStatus(`Retrieving docs (${i + 1}/${normalizedActions.length})...`)
+      try {
+        if (action.tool === 'web_search' && window.scark?.query?.websearch) {
+          const pages = queryMode === 'research' ? 5 : askPageCap
+          const timeout = queryMode === 'research' ? 22000 : 9000
+          const hits = await awaitWithAbort(window.scark.query.websearch(action.args.query, pages), abortCtrl, timeout)
+          for (const h of (hits ?? [])) {
+            gathered.push({ type: 'web', title: h.title, url: h.url, text: h.text })
+          }
+        }
+
+        if (action.tool === 'read_url' && window.scark?.query?.fetchUrl) {
+          const timeout = queryMode === 'research' ? 18000 : 8000
+          const page = await awaitWithAbort(window.scark.query.fetchUrl(action.args.url), abortCtrl, timeout)
+          if (page?.text) {
+            gathered.push({ type: 'url', title: page.title || action.args.url, url: action.args.url, text: page.text })
+          }
+        }
+
+        if (action.tool === 'knowledge_search' && window.scark?.chat?.getContext) {
+          const kbCtx = await awaitWithAbort(window.scark.chat.getContext({
+            messages: [{ role: 'user', content: action.args.query }],
+            topK: queryMode === 'research' ? 8 : 5,
+            mode: 'ask',
+          }), abortCtrl, queryMode === 'research' ? 12000 : 7000).catch(() => null)
+
+          if (kbCtx?.success) {
+            for (const s of (kbCtx.sources ?? [])) {
+              gathered.push({ type: 'knowledge', title: s.title, url: s.url, text: '' })
+            }
+            if (kbCtx.systemPrompt) {
+              gathered.push({ type: 'knowledge_prompt', title: 'Knowledge context', url: '', text: kbCtx.systemPrompt })
+            }
+          }
+        }
+      } catch (e) {
+        if (e?.name === 'AbortError') throw e
+        console.warn(`[Agent] Tool ${action.tool} failed:`, e?.message || e)
+      }
+    }
+
+    const seen = new Set()
+    return gathered.filter(r => {
+      const key = r.url || `${r.type}:${r.title}`
+      if (!key || seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
+  }, [awaitWithAbort, throwIfAborted])
+
+  const buildAgentSystemPrompt = useCallback((queryMode, docs, fallbackPrompt) => {
+    const knowledgePrompt = docs.find(d => d.type === 'knowledge_prompt')?.text
+    const docItems = docs.filter(d => d.type !== 'knowledge_prompt' && d.text)
+
+    const charBudget = queryMode === 'research' ? 12000 : 7000
+    let used = 0
+    let contextText = ''
+    const usedDocs = []
+
+    for (let i = 0; i < docItems.length; i++) {
+      const d = docItems[i]
+      const entry = `[${usedDocs.length + 1}] ${d.title || d.url}\n${d.text}\n\n`
+      if (used + entry.length > charBudget && usedDocs.length > 0) break
+      used += entry.length
+      usedDocs.push(d)
+      contextText += entry
+    }
+
+    const basePrompt = knowledgePrompt || fallbackPrompt || 'You are a helpful assistant.'
+    const modeInstruction = queryMode === 'research'
+      ? 'Use evidence from sources, synthesize across documents, and call out uncertainty briefly when sources conflict.'
+      : 'Use evidence from sources when available and keep the answer direct.'
+
+    return {
+      systemPrompt: `${basePrompt}\n\n${modeInstruction}\n${contextText ? `\nReference material:\n${contextText}` : ''}`,
+      sources: usedDocs.map(d => ({ title: d.title, url: d.url })),
+      docDigest: usedDocs.map((d, i) => `[${i + 1}] ${d.title || d.url}`).join('\n')
+    }
+  }, [])
+
+  const buildReasoningPreview = useCallback((queryMode, actions, sourceCount, reflectionNotes) => {
+    const modeLabel = queryMode === 'research' ? 'Deep Research' : 'Ask'
+    const actionLines = actions.length
+      ? actions.map((a, idx) => {
+          const arg = a.args?.query || a.args?.url || ''
+          return `${idx + 1}. ${a.tool}${arg ? ` -> ${arg}` : ''}`
+        }).join('\n')
+      : '1. none'
+
+    const reflectionExcerpt = (reflectionNotes || '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 360)
+
+    return [
+      `Mode: ${modeLabel}`,
+      '',
+      'Plan:',
+      actionLines,
+      '',
+      `Retrieved sources: ${sourceCount}`,
+      queryMode === 'research' ? 'Pipeline: retrieve docs -> summarize -> reason x3 -> reflect -> expand' : 'Pipeline: retrieve docs -> reason x3 -> reflect -> final',
+      reflectionExcerpt ? `Reflection preview: ${reflectionExcerpt}${reflectionNotes.length > 360 ? ' ...' : ''}` : 'Reflection preview: pending',
+    ].join('\n')
+  }, [])
+
   const executeSend = async (queryText, queryMode, currentMessages) => {
+    let chatId = activeChatId
+    let chatTitle = activeChatTitle
+    try {
+      const ensured = await ensureActiveChat()
+      chatId = ensured.id
+      chatTitle = ensured.title
+    } catch (e) {
+      setMessages(msgs => [...msgs, { role: 'assistant', content: 'Error: failed to create chat session.' }])
+      return
+    }
+
     const userMsg = { role: 'user', content: queryText }
     const newMessages = [...currentMessages, userMsg]
 
     setMessages(newMessages)
     setIsTyping(true)
     setStreamingContent('')
+    streamBufferRef.current = ''
+    setStreamingReasoningPreview('')
     setSources([])
+    initializeRoadmap(queryMode)
     adjustHeight(true)
 
-    // 1. Retrieve context — strategy differs by mode
-    let context = null
-
-    if (queryMode === 'ask' && window.scark?.chat) {
-      // Ask mode: let the model decide which tools to use (web search, URL read,
-      // local knowledge, or nothing). Execute all chosen actions in parallel,
-      // then merge results into a unified context for the final answer.
-      const { actions } = await planActions(queryText);
-
-      if (actions.length > 0) {
-        const toolLabels = [...new Set(actions.map(a => a.tool))].join(', ');
-        setStatus(`Running tools: ${toolLabels}…`);
-
-        // Batch all web_search queries into ONE call (single browser launch)
-        const webQueries = actions.filter(a => a.tool === 'web_search').map(a => a.args.query);
-        const otherActions = actions.filter(a => a.tool !== 'web_search');
-
-        const toolPromises = [];
-
-        // Single batched web search for all queries
-        if (webQueries.length > 0 && window.scark?.query?.batchWebsearch) {
-          toolPromises.push(
-            window.scark.query.batchWebsearch(webQueries, 5).then(hits =>
-              (hits ?? []).map(r => ({ type: 'web', title: r.title, url: r.url, text: r.text }))
-            ).catch(() => [])
-          );
-        }
-
-        // Execute remaining actions (read_url, knowledge_search) in parallel
-        for (const action of otherActions) {
-          toolPromises.push((async () => {
-            try {
-              switch (action.tool) {
-                case 'read_url': {
-                  if (!window.scark?.query?.fetchUrl) return [];
-                  const page = await window.scark.query.fetchUrl(action.args.url);
-                  if (!page) return [];
-                  return [{
-                    type: 'url',
-                    title: page.title || action.args.url,
-                    url: action.args.url,
-                    text: page.text,
-                  }];
-                }
-                case 'knowledge_search': {
-                  const kbCtx = await window.scark.chat.getContext({
-                    messages: [{ role: 'user', content: action.args.query }],
-                    topK: 5,
-                    mode: 'ask',
-                  }).catch(() => null);
-                  if (!kbCtx?.success) return [];
-                  return (kbCtx.sources ?? []).map((s, i) => ({
-                    type: 'knowledge',
-                    title: s.title,
-                    url: s.url,
-                    text: '',
-                    _systemPrompt: i === 0 ? kbCtx.systemPrompt : null,
-                  }));
-                }
-                default:
-                  return [];
-              }
-            } catch (e) {
-              console.warn(`[Ask] Tool ${action.tool} failed:`, e.message);
-              return [];
-            }
-          })());
-        }
-
-        const results = await Promise.all(toolPromises);
-
-        // Flatten and deduplicate by URL
-        const seen = new Set();
-        const allResults = results.flat().filter(r => {
-          if (!r.url || seen.has(r.url)) return false;
-          seen.add(r.url);
-          return true;
-        });
-
-        if (allResults.length > 0) {
-          const kbPrompt = allResults.find(r => r._systemPrompt)?._systemPrompt;
-          const webAndUrlResults = allResults.filter(r => r.type === 'web' || r.type === 'url');
-
-          if (webAndUrlResults.length > 0) {
-            // Budget-trim: ~4 chars per token, cap context at 1800 tokens
-            // so conversation history + system boilerplate still fit the 3200-token prompt budget
-            const CONTEXT_CHAR_BUDGET = 1800 * 4;
-            let contextText = '';
-            let usedChars = 0;
-            let sourceIdx = 0;
-            for (const r of webAndUrlResults) {
-              const entry = `[${sourceIdx + 1}] ${r.title}\n${r.text}\n\n`;
-              if (usedChars + entry.length > CONTEXT_CHAR_BUDGET && sourceIdx > 0) break;
-              contextText += entry;
-              usedChars += entry.length;
-              sourceIdx++;
-            }
-
-            const sysPrompt = kbPrompt
-              ? `${kbPrompt}\n\nAdditional web/source results:\n\n${contextText}`
-              : `You are a helpful assistant. Use the following information to answer accurately.\n\n${contextText}`;
-            context = {
-              success: true,
-              systemPrompt: sysPrompt,
-              sources: allResults.slice(0, sourceIdx + (kbPrompt ? allResults.filter(r => r.type === 'knowledge').length : 0))
-                .map(r => ({ title: r.title, url: r.url })),
-            };
-          } else if (kbPrompt) {
-            context = {
-              success: true,
-              systemPrompt: kbPrompt,
-              sources: allResults.map(r => ({ title: r.title, url: r.url })),
-            };
-          }
-        }
-
-        setStatus('');
-      }
-
-      // Fall back to quick ChromaDB context if no actions were planned or all failed
-      if (!context && window.scark?.chat) {
-        const chromaCtx = await window.scark.chat.getContext({ messages: newMessages, topK: 5, mode: 'ask' }).catch(() => null);
-        if (chromaCtx?.success) context = chromaCtx;
-      }
-
-    } else if (window.scark?.chat) {
-      // Research mode: full pipeline — intentional wait, web content is the answer
-      try {
-        context = await window.scark.chat.getContext({ messages: newMessages, topK: 5, mode: queryMode })
-      } catch (err) {
-        setMessages(msgs => [...msgs, { role: 'assistant', content: `Error fetching context: ${err?.message || 'Unknown'}` }])
-        setIsTyping(false)
-        return
-      }
-      if (!context?.success) {
-        setMessages(msgs => [...msgs, { role: 'assistant', content: `Error: ${context?.error || 'Context retrieval failed'}` }])
-        setIsTyping(false)
-        return
-      }
+    // Persist user turn immediately.
+    try {
+      await window.scark?.chat?.addMessage?.({
+        chatId,
+        role: 'user',
+        content: queryText,
+        reasoningPreview: '',
+      })
+      maybeGenerateChatTitle(chatId, chatTitle, queryText)
+    } catch (e) {
+      console.warn('[Chat] Failed to persist user message:', e?.message || e)
     }
 
-    // 2. Build full message list including retrieved system prompt
+    // 1. Agentic planning + retrieval
+    const abortCtrl = new AbortController()
+    webllmAbortRef.current = abortCtrl
+    let context = null
+
+    let plannedActions = []
+    let askPageCap = 2
+
+    try {
+      setRoadmapStep('plan', 'in_progress')
+      setStatus('Planning actions...')
+      const { actions } = await planActions(queryText, queryMode)
+      plannedActions = actions
+      throwIfAborted(abortCtrl)
+
+      if (queryMode === 'ask') {
+        askPageCap = await decideAskPageCap(queryText)
+        throwIfAborted(abortCtrl)
+      }
+
+      const planNote = queryMode === 'ask'
+        ? `${summarizeActions(actions)}\nask page cap: ${askPageCap}`
+        : summarizeActions(actions)
+      setRoadmapStep('plan', 'completed', planNote)
+
+      const retrieveStepId = queryMode === 'research' ? 'retrieve' : 'retrieve'
+      setRoadmapStep(retrieveStepId, 'in_progress')
+      setStatus(queryMode === 'research' ? 'Retrieving many docs...' : `Retrieving docs (cap ${askPageCap} page${askPageCap > 1 ? 's' : ''})...`)
+
+      const fallbackCtx = await awaitWithAbort(window.scark?.chat?.getContext({
+        messages: newMessages,
+        topK: queryMode === 'research' ? 8 : 5,
+        mode: queryMode,
+      }), abortCtrl, queryMode === 'research' ? 12000 : 7000).catch(() => null)
+
+      const plannedDocs = await runPlannedTools(actions, queryMode, abortCtrl, askPageCap)
+      throwIfAborted(abortCtrl)
+
+      const fallbackPrompt = fallbackCtx?.success ? fallbackCtx.systemPrompt : ''
+      const mergedSources = [
+        ...(plannedDocs ?? []),
+        ...((fallbackCtx?.sources ?? []).map(s => ({ type: 'knowledge', title: s.title, url: s.url, text: '' }))),
+      ]
+
+      const built = buildAgentSystemPrompt(queryMode, mergedSources, fallbackPrompt)
+      context = { success: true, systemPrompt: built.systemPrompt, sources: built.sources, docDigest: built.docDigest }
+
+      setRoadmapStep(retrieveStepId, 'completed', `${context.sources.length} source(s) gathered`)
+      setStreamingReasoningPreview(buildReasoningPreview(queryMode, plannedActions, context.sources.length, ''))
+
+      if (queryMode === 'research') {
+        setRoadmapStep('summarize', 'in_progress')
+        setStatus('Summarizing gathered docs...')
+        const summary = await webllmComplete([
+          { role: 'system', content: 'Summarize evidence for downstream reasoning. Return concise bullet points with [source] style references when possible.' },
+          { role: 'user', content: `Question: ${queryText}\n\nSources:\n${context.docDigest || 'No source digest available.'}` },
+        ], { maxTokens: 280 })
+        throwIfAborted(abortCtrl)
+        context.systemPrompt = `${context.systemPrompt}\n\nResearch summary:\n${summary}`
+        setRoadmapStep('summarize', 'completed', 'Evidence summary prepared')
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : (err?.message ?? 'Unknown error')
+      const isAbort = abortCtrl.signal.aborted || err?.name === 'AbortError'
+      if (!isAbort) setMessages(msgs => [...msgs, { role: 'assistant', content: `Error retrieving context: ${msg}` }])
+      setStatus('')
+      setIsTyping(false)
+      setAgentRoadmap(null)
+      webllmAbortRef.current = null
+      return
+    }
+
+    // 2. Multi-draft reasoning + reflection
+    const reasoningStep = queryMode === 'research' ? 'reason' : 'draft'
+    setRoadmapStep(reasoningStep, 'in_progress')
+    setStatus(queryMode === 'research' ? 'Running reasoning passes...' : 'Drafting candidate answers...')
+
+    let reflectionGuidance = ''
+    try {
+      const promptBase = [
+        { role: 'system', content: `${context.systemPrompt}\n\nDo not reveal chain-of-thought. Return only final answer text for this draft.` },
+        ...newMessages,
+      ]
+
+      const [draft1, draft2, draft3] = await Promise.all([
+        webllmComplete([...promptBase, { role: 'user', content: 'Draft style: concise and factual. Keep it short.' }], { maxTokens: queryMode === 'research' ? 380 : 240 }),
+        webllmComplete([...promptBase, { role: 'user', content: 'Draft style: analytical with explicit source grounding.' }], { maxTokens: queryMode === 'research' ? 420 : 260 }),
+        webllmComplete([...promptBase, { role: 'user', content: 'Draft style: practical, action-oriented, and easy to follow.' }], { maxTokens: queryMode === 'research' ? 420 : 260 }),
+      ])
+
+      throwIfAborted(abortCtrl)
+      setRoadmapStep(reasoningStep, 'completed', '3 candidate drafts generated')
+
+      setRoadmapStep('reflect', 'in_progress')
+      setStatus('Running reflection pass...')
+
+      reflectionGuidance = await webllmComplete([
+        {
+          role: 'system',
+          content:
+            'You are a reflection model. Compare 3 candidate answers and select the strongest one. ' +
+            'Return:\n1) Best draft number\n2) Why it is best (short)\n3) Improvement checklist (3-5 bullets).\n' +
+            'Do not include chain-of-thought.',
+        },
+        {
+          role: 'user',
+          content:
+            `Question: ${queryText}\n\nDraft 1:\n${draft1}\n\nDraft 2:\n${draft2}\n\nDraft 3:\n${draft3}`,
+        },
+      ], { maxTokens: 260 })
+
+      throwIfAborted(abortCtrl)
+      setRoadmapStep('reflect', 'completed', 'Best draft selected with improvements')
+      setStreamingReasoningPreview(buildReasoningPreview(queryMode, plannedActions, context?.sources?.length || 0, reflectionGuidance))
+    } catch (err) {
+      const isAbort = abortCtrl.signal.aborted || err?.name === 'AbortError'
+      if (!isAbort) {
+        setMessages(msgs => [...msgs, { role: 'assistant', content: `Error during reasoning: ${err?.message || 'Unknown error'}` }])
+      }
+      setStatus('')
+      setIsTyping(false)
+      setAgentRoadmap(null)
+      setStreamingReasoningPreview('')
+      webllmAbortRef.current = null
+      return
+    }
+
+    // 3. Build full message list including retrieved system prompt
     const fullMessages = context
       ? [{ role: 'system', content: context.systemPrompt }, ...newMessages]
       : newMessages
 
-    // 3. Stream completion locally via WebLLM
-    const abortCtrl = new AbortController()
-    webllmAbortRef.current = abortCtrl
+    const finalStep = queryMode === 'research' ? 'expand' : 'final'
+    setRoadmapStep(finalStep, 'in_progress')
+    setStatus(queryMode === 'research' ? 'Expanding final answer...' : 'Composing final answer...')
 
     try {
-      for await (const token of webllmStreamChat(fullMessages, { signal: abortCtrl.signal })) {
-        setStreamingContent(prev => prev + token)
+      const finalInstruction = queryMode === 'research'
+        ? 'Using the reflection notes, produce a structured deep-research answer: executive summary, key findings, evidence-backed analysis, and clear next steps.'
+        : 'Using the reflection notes, produce the best single final answer. Keep it concise and useful.'
+
+      const guidedMessages = [
+        ...fullMessages,
+        {
+          role: 'user',
+          content: `${finalInstruction}\n\nReflection notes:\n${reflectionGuidance}`,
+        },
+      ]
+
+      for await (const token of webllmStreamChat(guidedMessages, { signal: abortCtrl.signal })) {
+        streamBufferRef.current += token
+        setStreamingContent(streamBufferRef.current)
       }
     } catch (err) {
       const isAbort = abortCtrl.signal.aborted || err?.name === 'AbortError'
@@ -732,18 +1069,40 @@ export default function Chat() {
           ? err.message
           : (typeof err === 'string' ? err : (err?.message ?? JSON.stringify(err)))
         setMessages(msgs => [...msgs, { role: 'assistant', content: `Error: ${msg || 'Unknown inference error'}` }])
+        streamBufferRef.current = ''
         setStreamingContent('')
         setIsTyping(false)
+        setAgentRoadmap(null)
+        setStreamingReasoningPreview('')
         return
       }
     }
 
     // 4. Commit streamed tokens as a message
-    setStreamingContent(prev => {
-      if (prev) setMessages(msgs => [...msgs, { role: 'assistant', content: prev }])
-      return ''
-    })
+    const finalText = streamBufferRef.current
+    if (finalText) {
+      streamBufferRef.current = ''
+      setMessages(msgs => [...msgs, { role: 'assistant', content: finalText, reasoningPreview: streamingReasoningPreview }])
+
+      try {
+        await window.scark?.chat?.addMessage?.({
+          chatId,
+          role: 'assistant',
+          content: finalText,
+          reasoningPreview: streamingReasoningPreview || '',
+        })
+      } catch (e) {
+        console.warn('[Chat] Failed to persist assistant message:', e?.message || e)
+      }
+
+      updateRollingSummary(chatId, queryText, finalText)
+    }
+    setStreamingContent('')
+    setRoadmapStep(finalStep, 'completed', 'Response generated')
     if (context?.sources?.length > 0) setSources(context.sources)
+    setStatus('')
+    setAgentRoadmap(null)
+    setStreamingReasoningPreview('')
     webllmAbortRef.current = null
     setIsTyping(false)
   }
@@ -778,16 +1137,33 @@ export default function Chat() {
     await executeSend(query, currentMode, messages)
   }
 
-  const handleStopResponse = () => {
+  const handleStopResponse = async () => {
     if (webllmAbortRef.current) {
       webllmAbortRef.current.abort()
       webllmAbortRef.current = null
     }
-    // Commit any partial streamed response
-    setStreamingContent(prev => {
-      if (prev) setMessages(msgs => [...msgs, { role: 'assistant', content: prev }])
-      return ''
-    })
+    // Commit any partial streamed response once.
+    const partial = streamBufferRef.current
+    if (partial) {
+      streamBufferRef.current = ''
+      setMessages(msgs => [...msgs, { role: 'assistant', content: partial, reasoningPreview: streamingReasoningPreview }])
+      if (activeChatId) {
+        try {
+          await window.scark?.chat?.addMessage?.({
+            chatId: activeChatId,
+            role: 'assistant',
+            content: partial,
+            reasoningPreview: streamingReasoningPreview || '',
+          })
+        } catch (e) {
+          console.warn('[Chat] Failed to persist partial response:', e?.message || e)
+        }
+      }
+    }
+    setStreamingContent('')
+    setAgentRoadmap(null)
+    setStreamingReasoningPreview('')
+    setStatus('')
     setIsTyping(false)
   }
 
@@ -840,6 +1216,12 @@ export default function Chat() {
                   className="prose dark:prose-invert max-w-none prose-p:my-0 prose-pre:bg-transparent prose-pre:p-0 prose-headings:my-1 prose-ul:my-0 prose-li:my-0 pb-1 leading-snug"
                   style={{ fontFamily: 'ui-serif, Georgia, Cambria, "Times New Roman", Times, serif', fontSize: '16px' }}
                 >
+                  {msg.reasoningPreview ? (
+                    <details className="mb-3 rounded-lg border border-black/10 dark:border-white/10 bg-black/5 dark:bg-white/5 px-3 py-2 font-sans">
+                      <summary className="cursor-pointer text-xs font-medium text-foreground/70 select-none">Reasoning preview</summary>
+                      <pre className="mt-2 whitespace-pre-wrap text-[11px] leading-relaxed text-foreground/65 font-mono">{msg.reasoningPreview}</pre>
+                    </details>
+                  ) : null}
                   <ReactMarkdown
                     remarkPlugins={[remarkGfm, remarkBreaks, remarkExternalLinks]}
                     components={{
@@ -909,78 +1291,104 @@ export default function Chat() {
             <div className="max-w-[80%] px-5 py-3 rounded-2xl dark:text-gray-200 text-gray-800 whitespace-pre-wrap text-sm leading-relaxed">
               {!streamingContent ? (
                 /* Shimmering loader when not streaming tokens yet */
-                <div className="flex items-center gap-2 h-8">
-                  <Sparkles className="w-4 h-4 text-black dark:text-white animate-pulse" />
-                  <span 
-                    className="font-medium tracking-wide bg-clip-text text-transparent bg-size-[200%_auto] animate-shimmer"
-                    style={{ backgroundImage: 'linear-gradient(90deg, var(--color-foreground) 0%, gray 50%, var(--color-foreground) 100%)' }}
-                  >
-                    Thinking deeply...
-                  </span>
+                <div className="space-y-3">
+                  <div className="flex items-center gap-2 h-8">
+                    <Sparkles className="w-4 h-4 text-black dark:text-white animate-pulse" />
+                    <span
+                      className="font-medium tracking-wide bg-clip-text text-transparent bg-size-[200%_auto] animate-shimmer"
+                      style={{ backgroundImage: 'linear-gradient(90deg, var(--color-foreground) 0%, gray 50%, var(--color-foreground) 100%)' }}
+                    >
+                      {status || 'Thinking deeply...'}
+                    </span>
+                  </div>
+
+                  {agentRoadmap && (
+                    <div className="rounded-xl border border-black/10 dark:border-white/10 bg-black/5 dark:bg-white/5 p-3 text-xs font-mono space-y-1.5">
+                      <p className="font-semibold text-foreground/80 mb-1">Roadmap</p>
+                      {agentRoadmap.map((step, idx) => (
+                        <div key={step.id} className="flex items-start gap-2 text-foreground/70">
+                          <span className="w-4 inline-block">{step.status === 'completed' ? '✓' : step.status === 'in_progress' ? '>' : '-'}</span>
+                          <div className="flex-1">
+                            <p>{idx + 1}. {step.label}</p>
+                            {step.note ? <p className="text-[11px] text-foreground/50 whitespace-pre-wrap">{step.note}</p> : null}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
               ) : (
                 /* Streaming text view */
-                <article 
-                  className="prose dark:prose-invert max-w-none prose-p:my-0 prose-pre:bg-transparent prose-pre:p-0 prose-headings:my-1 prose-ul:my-0 prose-li:my-0 pb-1 leading-snug overflow-hidden"
-                  style={{ fontFamily: 'ui-serif, Georgia, Cambria, "Times New Roman", Times, serif', fontSize: '16px' }}
-                >
-                  <ReactMarkdown
-                    remarkPlugins={[remarkGfm, remarkBreaks, remarkExternalLinks]}
-                    components={{
-                      a({ href, children }) {
-                        const isRawUrl = typeof children?.[0] === 'string' && children[0] === href;
-                        let displayText = children;
-                        let domain = '';
-                        
-                        try {
-                          const urlObj = new URL(href);
-                          domain = urlObj.hostname.replace(/^www\./, '');
-                        } catch (e) {
-                          domain = href;
-                        }
+                <div className="space-y-3">
+                  {streamingReasoningPreview ? (
+                    <details className="rounded-lg border border-black/10 dark:border-white/10 bg-black/5 dark:bg-white/5 px-3 py-2 font-sans">
+                      <summary className="cursor-pointer text-xs font-medium text-foreground/70 select-none">Reasoning preview</summary>
+                      <pre className="mt-2 whitespace-pre-wrap text-[11px] leading-relaxed text-foreground/65 font-mono">{streamingReasoningPreview}</pre>
+                    </details>
+                  ) : null}
 
-                        if (isRawUrl) {
-                          displayText = domain + (href.length > domain.length + 8 ? '...' : '');
-                        }
-                        
-                        return (
-                          <span className="relative inline-block group mx-1 align-middle">
-                            <a href={href} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-black/5 dark:bg-white/10 hover:bg-black/10 dark:hover:bg-white/20 text-xs font-sans text-gray-700 dark:text-gray-300 no-underline transition-all ring-1 ring-black/5 dark:ring-white/10">
-                              <Globe className="w-3 h-3 opacity-70 shrink-0" />
-                              <span className="truncate max-w-30">{domain}</span>
-                            </a>
-                            
-                            {/* Hover Card */}
-                            <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-64 p-3 bg-white dark:bg-[#1C1C1C] rounded-xl shadow-xl border border-black/5 dark:border-white/10 opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all duration-200 z-50 text-left font-sans flex flex-col gap-1.5 transform scale-95 group-hover:scale-100 origin-bottom pointer-events-none">
-                               <div className="flex items-center gap-2 text-xs font-semibold text-gray-700 dark:text-gray-300">
-                                  <Globe className="w-3.5 h-3.5 opacity-70 shrink-0" />
-                                  <span className="truncate">{domain}</span>
-                               </div>
-                               <div className="text-[13px] font-normal text-gray-600 dark:text-gray-400 line-clamp-3 leading-snug break-all">
-                                  {href}
-                               </div>
-                            </div>
-                          </span>
-                        );
-                      },
-                      code({ node, inline, className, children, ...props }) {
-                        const match = /language-(\w+)/.exec(className || '')
-                        // Use a simpler static block for streaming content to avoid heavy SyntaxHighlighter stutter/jitter
-                        return !inline && match ? (
-                          <div className="my-2 rounded-xl overflow-hidden border border-white/5 bg-[#121212] p-4 font-mono text-[0.85rem] whitespace-pre tabular-nums">
-                            {children}
-                          </div>
-                        ) : (
-                          <code className={cn("bg-black/10 dark:bg-white/10 px-1 rounded", className)} {...props}>
-                            {children}
-                          </code>
-                        )
-                      }
-                    }}
+                  <article 
+                    className="prose dark:prose-invert max-w-none prose-p:my-0 prose-pre:bg-transparent prose-pre:p-0 prose-headings:my-1 prose-ul:my-0 prose-li:my-0 pb-1 leading-snug overflow-hidden"
+                    style={{ fontFamily: 'ui-serif, Georgia, Cambria, "Times New Roman", Times, serif', fontSize: '16px' }}
                   >
-                    {streamingContent + '`▍`'}
-                  </ReactMarkdown>
-                </article>
+                    <ReactMarkdown
+                      remarkPlugins={[remarkGfm, remarkBreaks, remarkExternalLinks]}
+                      components={{
+                        a({ href, children }) {
+                          const isRawUrl = typeof children?.[0] === 'string' && children[0] === href;
+                          let displayText = children;
+                          let domain = '';
+                          
+                          try {
+                            const urlObj = new URL(href);
+                            domain = urlObj.hostname.replace(/^www\./, '');
+                          } catch (e) {
+                            domain = href;
+                          }
+
+                          if (isRawUrl) {
+                            displayText = domain + (href.length > domain.length + 8 ? '...' : '');
+                          }
+                          
+                          return (
+                            <span className="relative inline-block group mx-1 align-middle">
+                              <a href={href} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-black/5 dark:bg-white/10 hover:bg-black/10 dark:hover:bg-white/20 text-xs font-sans text-gray-700 dark:text-gray-300 no-underline transition-all ring-1 ring-black/5 dark:ring-white/10">
+                                <Globe className="w-3 h-3 opacity-70 shrink-0" />
+                                <span className="truncate max-w-30">{domain}</span>
+                              </a>
+                              
+                              {/* Hover Card */}
+                              <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-64 p-3 bg-white dark:bg-[#1C1C1C] rounded-xl shadow-xl border border-black/5 dark:border-white/10 opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all duration-200 z-50 text-left font-sans flex flex-col gap-1.5 transform scale-95 group-hover:scale-100 origin-bottom pointer-events-none">
+                                 <div className="flex items-center gap-2 text-xs font-semibold text-gray-700 dark:text-gray-300">
+                                    <Globe className="w-3.5 h-3.5 opacity-70 shrink-0" />
+                                    <span className="truncate">{domain}</span>
+                                 </div>
+                                 <div className="text-[13px] font-normal text-gray-600 dark:text-gray-400 line-clamp-3 leading-snug break-all">
+                                    {href}
+                                 </div>
+                              </div>
+                            </span>
+                          );
+                        },
+                        code({ node, inline, className, children, ...props }) {
+                          const match = /language-(\w+)/.exec(className || '')
+                          // Use a simpler static block for streaming content to avoid heavy SyntaxHighlighter stutter/jitter
+                          return !inline && match ? (
+                            <div className="my-2 rounded-xl overflow-hidden border border-white/5 bg-[#121212] p-4 font-mono text-[0.85rem] whitespace-pre tabular-nums">
+                              {children}
+                            </div>
+                          ) : (
+                            <code className={cn("bg-black/10 dark:bg-white/10 px-1 rounded", className)} {...props}>
+                              {children}
+                            </code>
+                          )
+                        }
+                      }}
+                    >
+                      {streamingContent + '`▍`'}
+                    </ReactMarkdown>
+                  </article>
+                </div>
               )}
             </div>
           </motion.div>

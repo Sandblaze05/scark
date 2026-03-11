@@ -36,20 +36,6 @@ const config = {
         return config;
     },
 
-    // Required security headers for SharedArrayBuffer (used by WebLLM/WASM threads)
-    // In Electron dev mode the Next.js server handles these. For production (static
-    // export) Electron sets them via session.defaultSession.webRequest.
-    async headers() {
-        return [
-            {
-                source: '/(.*)',
-                headers: [
-                    { key: 'Cross-Origin-Opener-Policy', value: 'same-origin' },
-                    { key: 'Cross-Origin-Embedder-Policy', value: 'require-corp' },
-                ],
-            },
-        ];
-    },
 };
 
 export default config;

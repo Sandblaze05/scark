@@ -11,6 +11,17 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { WorkerPool } from '../workers/pool.js';
 import { buildSystemPrompt, rewriteQuery, requiresFreshData, requiresSearch } from '../services/chatService.js';
+import {
+    addChatMessage,
+    createChatSession,
+    deleteChatSession,
+    getChatSession,
+    listChatSessions,
+    renameChatSession,
+    setChatPinned,
+    setChatSummary,
+    touchChatSession,
+} from '../services/sqliteService.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const isDev = !app.isPackaged;
@@ -25,6 +36,22 @@ app.commandLine.appendSwitch('force_high_performance_gpu');
 let mainWindow;
 let ingestionPool;
 let queryPool;
+
+function ensureDefaultChat() {
+    const chats = listChatSessions();
+    if (chats.length > 0) return chats;
+    createChatSession({ title: 'New chat' });
+    return listChatSessions();
+}
+
+function broadcastChatListUpdated() {
+    const chats = ensureDefaultChat();
+    BrowserWindow.getAllWindows().forEach(win => win.webContents.send('chat:list-updated', chats));
+}
+
+function broadcastChatSelected(chatId) {
+    BrowserWindow.getAllWindows().forEach(win => win.webContents.send('chat:selected', chatId));
+}
 
 // ── Window ────────────────────────────────────────────────
 
@@ -96,6 +123,64 @@ function initWorkerPools() {
 
 
 function registerIPC() {
+    // Chat sessions list (creates a default chat if DB is empty)
+    ipcMain.handle('chat:list', async () => {
+        return ensureDefaultChat();
+    });
+
+    ipcMain.handle('chat:create', async (_event, payload = {}) => {
+        const chat = createChatSession({ title: payload.title || 'New chat' });
+        broadcastChatListUpdated();
+        if (payload.select !== false) broadcastChatSelected(chat.id);
+        return chat;
+    });
+
+    ipcMain.handle('chat:get', async (_event, chatId) => {
+        return getChatSession(chatId);
+    });
+
+    ipcMain.handle('chat:rename', async (_event, chatId, title) => {
+        const updated = renameChatSession(chatId, title);
+        broadcastChatListUpdated();
+        return updated;
+    });
+
+    ipcMain.handle('chat:pin', async (_event, chatId, isPinned) => {
+        const updated = setChatPinned(chatId, isPinned);
+        broadcastChatListUpdated();
+        return updated;
+    });
+
+    ipcMain.handle('chat:delete', async (_event, chatId) => {
+        deleteChatSession(chatId);
+        const chats = ensureDefaultChat();
+        broadcastChatListUpdated();
+        if (chats.length > 0) broadcastChatSelected(chats[0].id);
+        return { success: true };
+    });
+
+    ipcMain.handle('chat:addMessage', async (_event, payload) => {
+        const updated = addChatMessage(payload);
+        broadcastChatListUpdated();
+        return updated;
+    });
+
+    ipcMain.handle('chat:setSummary', async (_event, chatId, summary) => {
+        const updated = setChatSummary(chatId, summary);
+        broadcastChatListUpdated();
+        return updated;
+    });
+
+    ipcMain.handle('chat:touch', async (_event, chatId) => {
+        const touched = touchChatSession(chatId);
+        broadcastChatListUpdated();
+        return touched;
+    });
+
+    ipcMain.on('chat:select', (_event, chatId) => {
+        broadcastChatSelected(chatId);
+    });
+
     // Run full ingestion pipeline
     ipcMain.handle('pipeline:run', (_event, opts) => {
         return ingestionPool.exec({ type: 'runPipeline', data: { opts } });
@@ -212,13 +297,9 @@ function registerIPC() {
 
     // Handle 'New Chat' signals from any frontend slice (like Navbar)
     ipcMain.on('chat:triggerNew', (event) => {
-        // Stop any ongoing stream
-        if (currentChatAbortController) {
-            currentChatAbortController.abort();
-            currentChatAbortController = null;
-        }
-        // Broadcast reset to all windows
-        BrowserWindow.getAllWindows().forEach(win => win.webContents.send('chat:new'));
+        const chat = createChatSession({ title: 'New chat' });
+        broadcastChatListUpdated();
+        broadcastChatSelected(chat.id);
     });
 
     // Quick web search – used when the model decides it needs current info in ask mode

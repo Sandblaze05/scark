@@ -160,6 +160,44 @@ export async function planSearchQueries(userQuery) {
 }
 
 /**
+ * Ask-mode evidence depth estimator.
+ *
+ * Returns how many pages should be crawled per web_search action.
+ * 1 page  -> single-source factual lookup (weather, stock quote, quick fact)
+ * 2 pages -> normal ask queries
+ * 3 pages -> higher-stakes or potentially conflicting facts
+ *
+ * @param {string} userQuery
+ * @returns {Promise<number>} integer in [1, 3]
+ */
+export async function decideAskPageCap(userQuery) {
+    if (!_s.engine) return 2;
+
+    const messages = [
+        {
+            role: 'system',
+            content:
+                'You decide web evidence depth for ASK mode.\n' +
+                'Output exactly one integer: 1, 2, or 3.\n\n' +
+                'Use 1 for single-source quick facts (weather, exchange rate, price-like lookups).\n' +
+                'Use 2 for most normal questions.\n' +
+                'Use 3 for high-stakes, nuanced, or likely-conflicting information.\n' +
+                'Do not output any words, punctuation, or explanation.',
+        },
+        { role: 'user', content: userQuery },
+    ];
+
+    try {
+        const text = await complete(messages, { maxTokens: 4 });
+        const match = text.match(/[123]/);
+        const value = match ? Number(match[0]) : 2;
+        return Math.min(3, Math.max(1, value));
+    } catch (_) {
+        return 2;
+    }
+}
+
+/**
  * Ask the model to decide which tools to use for the user's query.
  *
  * Available tools:
@@ -172,10 +210,26 @@ export async function planSearchQueries(userQuery) {
  * Capped at 120 output tokens so the planning probe stays fast.
  *
  * @param {string} userQuery
+ * @param {'ask'|'research'} [mode]
  * @returns {Promise<{ actions: Array<{ tool: string, args: Record<string, string> }> }>}
  */
-export async function planActions(userQuery) {
+export async function planActions(userQuery, mode = 'ask') {
     if (!_s.engine) return { actions: [] };
+
+    const modeRules = mode === 'research'
+        ? [
+            'Mode: deep research.',
+            '- Prefer broader evidence collection.',
+            '- You may propose up to 6 actions total.',
+            '- Include multiple web_search lines when evidence breadth helps.',
+            '- Include read_url when the user references specific URLs/sources.',
+        ].join('\n')
+        : [
+            'Mode: ask (fast answer).',
+            '- Prefer minimal, high-value tool usage.',
+            '- Use 0-3 actions total when possible.',
+            '- Only use web_search when current/uncertain facts are required.',
+        ].join('\n');
 
     const planMessages = [
         {
@@ -187,6 +241,7 @@ export async function planActions(userQuery) {
                 '  read_url(url)           – fetch a specific webpage. Use when the user mentions a specific website, link, source, or documentation.\n' +
                 '  knowledge_search(query) – search locally stored knowledge. Use when the user asks about something that may have been researched before.\n' +
                 '  none                    – no tools needed. Use when your training knowledge is sufficient.\n\n' +
+                modeRules + '\n\n' +
                 'Rules:\n' +
                 '- Output one tool call per line.\n' +
                 '- For web_search: write 2-4 short, keyword-focused queries (one web_search per query). Do NOT copy the user sentence verbatim.\n' +
