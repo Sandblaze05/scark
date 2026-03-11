@@ -2,9 +2,14 @@
 // @xenova/transformers/src/env.js to throw a TypeError when it calls Object.keys()
 // on process.versions. We must safely polyfill it BEFORE importing.
 if (typeof process === 'undefined') {
-    self.process = { versions: {} };
-} else if (!process.versions) {
-    process.versions = {};
+    self.process = { versions: {}, env: {} };
+} else {
+    if (!process.versions || typeof process.versions !== 'object') {
+        process.versions = {};
+    }
+    if (!process.env || typeof process.env !== 'object') {
+        process.env = {};
+    }
 }
 if (typeof global === 'undefined') {
     self.global = self;

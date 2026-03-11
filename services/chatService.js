@@ -7,15 +7,31 @@
  */
 
 /**
- * Return the last user message as a standalone search query.
- * Advanced pronoun-resolution rewriting is handled in the renderer via WebLLM.
+ * Return a self-contained search query derived from the conversation.
+ *
+ * If the last user message looks like a follow-up (short, contains pronouns
+ * or words like "alternative", "other", "more", "else"), prepend the
+ * previous user message so the search has topical context.
  *
  * @param {Array<{ role: string, content: string }>} messages
  * @returns {string}
  */
 export function rewriteQuery(messages) {
-    const lastUser = [...messages].reverse().find(m => m.role === 'user');
-    return lastUser?.content ?? '';
+    const userMsgs = messages.filter(m => m.role === 'user');
+    const last = userMsgs[userMsgs.length - 1]?.content ?? '';
+    if (!last) return '';
+
+    // Heuristic: treat short messages with follow-up signals as context-dependent
+    const isFollowUp = last.split(/\s+/).length <= 8 &&
+        /\b(it|its|this|that|those|these|they|them|other|alternative|more|else|another|similar|instead|too|also|what about)\b/i.test(last);
+
+    if (isFollowUp && userMsgs.length >= 2) {
+        const prev = userMsgs[userMsgs.length - 2].content;
+        // Take the first 120 chars of the previous question as topical anchor
+        return `${prev.slice(0, 120)} — ${last}`;
+    }
+
+    return last;
 }
 
 /**

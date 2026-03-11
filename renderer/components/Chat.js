@@ -222,6 +222,7 @@ export default function Chat() {
   const mediaRecorderRef = useRef(null)
   const audioChunksRef = useRef([])
   const workerRef = useRef(null)
+  const workerHandlerRef = useRef(null)
 
   // WebLLM abort controller – set before each generation, cleared on stop/done
   const webllmAbortRef = useRef(null)
@@ -231,13 +232,14 @@ export default function Chat() {
   const [modelProgress, setModelProgress] = useState('')
   const [modelProgressPercent, setModelProgressPercent] = useState(0)
 
-  // Initialize whisper worker
-  useEffect(() => {
-    workerRef.current = new Worker(new URL('../lib/whisperWorker.js', import.meta.url), {
+  const ensureWhisperWorker = useCallback(() => {
+    if (workerRef.current) return workerRef.current
+
+    const worker = new Worker(new URL('../lib/whisperWorker.js', import.meta.url), {
       type: 'module'
     })
 
-    workerRef.current.addEventListener('message', (e) => {
+    const handleWorkerMessage = (e) => {
       const { status, text, data, error } = e.data
 
       if (status === 'progress') {
@@ -257,11 +259,12 @@ export default function Chat() {
         setIsTranscribing(false)
         setTranscriptionStatus('')
       }
-    })
-
-    return () => {
-      if (workerRef.current) workerRef.current.terminate()
     }
+
+    worker.addEventListener('message', handleWorkerMessage)
+    workerRef.current = worker
+    workerHandlerRef.current = handleWorkerMessage
+    return worker
   }, [])
 
   // Initialise WebLLM engine (downloads & caches model on first run)
@@ -353,7 +356,8 @@ export default function Chat() {
         const float32Data = audioBuffer.getChannelData(0)
 
         // Send to background worker
-        workerRef.current.postMessage({ audio: float32Data })
+        const worker = ensureWhisperWorker()
+        worker.postMessage({ audio: float32Data })
 
       } catch (err) {
         console.error('Audio conversion error:', err)
@@ -361,7 +365,7 @@ export default function Chat() {
         setTranscriptionStatus('')
       }
     }, 100)
-  }, [stopAudio])
+  }, [stopAudio, ensureWhisperWorker])
 
   // Discard: stop recording, delete audio
   const discardListening = useCallback(() => {
@@ -379,6 +383,8 @@ export default function Chat() {
     audioChunksRef.current = []
 
     try {
+      ensureWhisperWorker()
+
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
       mediaStreamRef.current = stream
 
@@ -407,12 +413,18 @@ export default function Chat() {
       console.error('Mic access denied:', err)
       stopAudio()
     }
-  }, [isListening, isTranscribing, value, stopAudio, animateWaveform])
+  }, [isListening, isTranscribing, value, stopAudio, animateWaveform, ensureWhisperWorker])
 
   // Cleanup on unmount
   useEffect(() => {
     return () => {
       if (mediaRecorderRef.current) mediaRecorderRef.current.stop()
+      if (workerRef.current) {
+        if (workerHandlerRef.current) {
+          workerRef.current.removeEventListener('message', workerHandlerRef.current)
+        }
+        workerRef.current.terminate()
+      }
       stopAudio()
     }
   }, [stopAudio])
@@ -949,6 +961,57 @@ export default function Chat() {
     ].join('\n')
   }, [])
 
+  const extractSilentChecklist = useCallback((notes) => {
+    if (!notes) return ''
+    const lines = notes
+      .split('\n')
+      .map(l => l.trim())
+      .filter(Boolean)
+
+    const bullets = lines
+      .filter(l => /^[-*•]\s+/.test(l) || /^\d+[.)]\s+/.test(l))
+      .map(l => l.replace(/^[-*•]\s+/, '').replace(/^\d+[.)]\s+/, '').trim())
+      .filter(Boolean)
+
+    return bullets.slice(0, 5).join('\n')
+  }, [])
+
+  const hasInternalReasoningLeak = useCallback((text) => {
+    const t = (text || '').toLowerCase()
+    return (
+      t.includes('reflection notes') ||
+      t.includes('improvement checklist') ||
+      t.includes('revised response') ||
+      t.includes('best single final answer') ||
+      t.includes('draft 1') ||
+      t.includes('draft 2') ||
+      t.includes('draft 3')
+    )
+  }, [])
+
+  const sanitizeLeakedMetaResponse = useCallback(async (queryText, leakedText) => {
+    try {
+      const cleaned = await webllmComplete([
+        {
+          role: 'system',
+          content:
+            'Rewrite the assistant response for an end user. ' +
+            'Remove all references to internal process, drafts, reflection, checklists, or analysis. ' +
+            'Do not mention rewriting. Return only the final user-facing answer text.'
+        },
+        {
+          role: 'user',
+          content:
+            `User question:\n${queryText}\n\nLeaked response:\n${leakedText}`
+        },
+      ], { maxTokens: 360 })
+
+      return (cleaned || '').trim()
+    } catch (_) {
+      return leakedText
+    }
+  }, [])
+
   const executeSend = async (queryText, queryMode, currentMessages) => {
     let chatId = activeChatId
     let chatTitle = activeChatTitle
@@ -997,7 +1060,7 @@ export default function Chat() {
     try {
       setRoadmapStep('plan', 'in_progress')
       setStatus('Planning actions...')
-      const { actions } = await planActions(queryText, queryMode)
+      const { actions } = await planActions(queryText, queryMode, currentMessages)
       plannedActions = actions
       throwIfAborted(abortCtrl)
 
@@ -1017,6 +1080,7 @@ export default function Chat() {
 
       const fallbackCtx = await awaitWithAbort(window.scark?.chat?.getContext({
         messages: newMessages,
+        chatId,
         topK: queryMode === 'research' ? 8 : 5,
         mode: queryMode,
       }), abortCtrl, queryMode === 'research' ? 12000 : 7000).catch(() => null)
@@ -1124,14 +1188,19 @@ export default function Chat() {
 
     try {
       const finalInstruction = queryMode === 'research'
-        ? 'Using the reflection notes, produce a structured deep-research answer: executive summary, key findings, evidence-backed analysis, and clear next steps.'
-        : 'Using the reflection notes, produce the best single final answer. Keep it concise and useful.'
+        ? 'Produce a structured deep-research answer: executive summary, key findings, evidence-backed analysis, and clear next steps.'
+        : 'Produce the best single final answer. Keep it concise and useful.'
+
+      const silentChecklist = extractSilentChecklist(reflectionGuidance)
 
       const guidedMessages = [
         ...fullMessages,
         {
           role: 'user',
-          content: `${finalInstruction}\n\nReflection notes:\n${reflectionGuidance}`,
+          content:
+            `${finalInstruction}\n\n` +
+            'Apply this internal quality checklist silently. Never mention checklist items, reflection, drafts, or internal reasoning in your output.\n' +
+            `${silentChecklist || 'Answer directly, be accurate, concise, and friendly.'}`,
         },
       ]
 
@@ -1156,8 +1225,12 @@ export default function Chat() {
     }
 
     // 4. Commit streamed tokens as a message
-    const finalText = streamBufferRef.current
+    let finalText = streamBufferRef.current
     if (finalText) {
+      if (hasInternalReasoningLeak(finalText)) {
+        finalText = await sanitizeLeakedMetaResponse(queryText, finalText)
+      }
+
       streamBufferRef.current = ''
       setMessages(msgs => [...msgs, { role: 'assistant', content: finalText, reasoningPreview: streamingReasoningPreview }])
       // Patch the response into turnVersions if this was an edit

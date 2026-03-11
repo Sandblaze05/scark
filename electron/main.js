@@ -32,14 +32,16 @@ const isDev = !app.isPackaged;
 const DEV_URL = 'http://localhost:3000';
 
 // ── GPU selection ─────────────────────────────────────────
-// Request the high-performance discrete GPU on multi-GPU laptops.
-// These switches must be set before the GPU process is spawned (i.e. before app ready).
-// WebLLM uses WebGPU via Dawn/D3D12 — no ANGLE override needed or safe here.
-app.commandLine.appendSwitch('force_high_performance_gpu');
+// Force high-performance GPU by default (requested for laptops that otherwise
+// overuse iGPU). Allow an opt-out env var for troubleshooting.
+if (process.env.SCARK_DISABLE_HIGH_PERF_GPU !== '1') {
+    app.commandLine.appendSwitch('force_high_performance_gpu');
+}
 
 let mainWindow;
 let ingestionPool;
 let queryPool;
+const DEFAULT_POOL_SIZE = isDev ? 1 : 2;
 
 function ensureDefaultChat() {
     const chats = listChatSessions();
@@ -111,16 +113,24 @@ async function waitForDevServer(url, retries = 60) {
     throw new Error(`Dev server at ${url} did not start in time`);
 }
 
-// ── Worker pools ──────────────────────────────────────────
+// ── Worker pools (lazy to lower idle RAM) ─────────────────
 
-function initWorkerPools() {
-    const ingestionScript = path.join(__dirname, '../workers/ingestion.worker.js');
-    const queryScript = path.join(__dirname, '../workers/query.worker.js');
+function getIngestionPool() {
+    if (!ingestionPool) {
+        const ingestionScript = path.join(__dirname, '../workers/ingestion.worker.js');
+        ingestionPool = new WorkerPool(ingestionScript, DEFAULT_POOL_SIZE);
+        console.log('[Main] Ingestion worker pool ready:', ingestionPool.stats);
+    }
+    return ingestionPool;
+}
 
-    ingestionPool = new WorkerPool(ingestionScript, 2);
-    queryPool = new WorkerPool(queryScript, 2);
-
-    console.log('[Main] Worker pools ready:', ingestionPool.stats, queryPool.stats);
+function getQueryPool() {
+    if (!queryPool) {
+        const queryScript = path.join(__dirname, '../workers/query.worker.js');
+        queryPool = new WorkerPool(queryScript, DEFAULT_POOL_SIZE);
+        console.log('[Main] Query worker pool ready:', queryPool.stats);
+    }
+    return queryPool;
 }
 
 // ── IPC handlers ──────────────────────────────────────────
@@ -195,22 +205,22 @@ function registerIPC() {
 
     // Run full ingestion pipeline
     ipcMain.handle('pipeline:run', (_event, opts) => {
-        return ingestionPool.exec({ type: 'runPipeline', data: { opts } });
+        return getIngestionPool().exec({ type: 'runPipeline', data: { opts } });
     });
 
     // Run a single pipeline stage
     ipcMain.handle('pipeline:stage', (_event, stage, data) => {
-        return ingestionPool.exec({ type: stage, data });
+        return getIngestionPool().exec({ type: stage, data });
     });
 
     // Query: embed text + search ChromaDB
     ipcMain.handle('query:search', (_event, query, topK) => {
-        return queryPool.exec({ type: 'queryChroma', data: { query, topK } });
+        return getQueryPool().exec({ type: 'queryChroma', data: { query, topK } });
     });
 
     // Chat: retrieve RAG context only - LLM streaming is handled by WebLLM in the renderer
     // mode: 'ask' (lightweight) or 'research' (full pipeline when needed)
-    ipcMain.handle('query:context', async (event, { messages, topK, mode }) => {
+    ipcMain.handle('query:context', async (event, { messages, chatId, topK, mode }) => {
         const RELEVANCE_THRESHOLD = 0.45;
 
         try {
@@ -219,8 +229,19 @@ function registerIPC() {
 
             const k = topK || 5;
 
-            // 0. Rewrite query (heuristic only — LLM no longer in main process)
-            const searchQuery = rewriteQuery(messages);
+            // 0. Rewrite query using full conversation history from SQLite
+            //    when available, so follow-ups like "any alternatives?" resolve
+            //    to the original topic.
+            let historyMessages = messages;
+            if (chatId) {
+                try {
+                    const chat = getChatSession(chatId);
+                    if (chat?.messages?.length > 0) {
+                        historyMessages = chat.messages.map(m => ({ role: m.role, content: m.content }));
+                    }
+                } catch (_) { /* fall back to provided messages */ }
+            }
+            const searchQuery = rewriteQuery(historyMessages);
             console.log('[Context] Search query:', searchQuery);
 
             // 1. Determine if search is needed
@@ -242,7 +263,7 @@ function registerIPC() {
                 if (!needsFreshDataExplicit) {
                     event.sender.send('chat:status', 'Checking existing knowledge…');
                     try {
-                        contextChunks = await queryPool.exec({
+                        contextChunks = await getQueryPool().exec({
                             type: 'retrieveContext',
                             data: { query: searchQuery, topK: k },
                         }) ?? [];
@@ -256,7 +277,7 @@ function registerIPC() {
                 if (relevant.length < MIN_CHUNKS || needsFreshDataExplicit) {
                     event.sender.send('chat:status', 'Searching & scraping the web for deep research…');
                     try {
-                        const webResults = await ingestionPool.exec({
+                        const webResults = await getIngestionPool().exec({
                             type: 'researchFetch',
                             data: { keyword: searchQuery, maxPages: 5 },
                         });
@@ -277,7 +298,7 @@ function registerIPC() {
                 if (!needsFreshDataExplicit) {
                     event.sender.send('chat:status', 'Checking existing knowledge…');
                     try {
-                        const allChunks = await queryPool.exec({
+                        const allChunks = await getQueryPool().exec({
                             type: 'retrieveContext',
                             data: { query: searchQuery, topK: k },
                         }) ?? [];
@@ -317,7 +338,7 @@ function registerIPC() {
     // Quick web search – used when the model decides it needs current info in ask mode
     ipcMain.handle('query:websearch', async (_event, query, maxPages = 3) => {
         try {
-            const webResults = await ingestionPool.exec({
+            const webResults = await getIngestionPool().exec({
                 type: 'quickSearch',
                 data: { keyword: query, maxPages },
             });
@@ -331,7 +352,7 @@ function registerIPC() {
     // Batched web search – multiple queries, ONE browser launch, shared page budget
     ipcMain.handle('query:batchWebsearch', async (_event, queries, maxTotalPages = 5) => {
         try {
-            const webResults = await ingestionPool.exec({
+            const webResults = await getIngestionPool().exec({
                 type: 'batchQuickSearch',
                 data: { queries, maxTotalPages },
             });
@@ -345,7 +366,7 @@ function registerIPC() {
     // Fetch a specific URL – used when the model decides to read a user-provided source
     ipcMain.handle('query:fetchUrl', async (_event, url) => {
         try {
-            const result = await ingestionPool.exec({
+            const result = await getIngestionPool().exec({
                 type: 'fetchUrl',
                 data: { url },
             });
@@ -358,8 +379,8 @@ function registerIPC() {
 
     // Worker pool stats
     ipcMain.handle('pool:stats', () => ({
-        ingestion: ingestionPool.stats,
-        query: queryPool.stats,
+        ingestion: ingestionPool ? ingestionPool.stats : { total: 0, idle: 0, busy: 0, queued: 0 },
+        query: queryPool ? queryPool.stats : { total: 0, idle: 0, busy: 0, queued: 0 },
     }));
 
     // Profile
@@ -375,17 +396,26 @@ function registerIPC() {
 // ── Lifecycle ─────────────────────────────────────────────
 
 app.whenReady().then(async () => {
-    initWorkerPools();
     registerIPC();
 
     if (isDev) {
-        await waitForDevServer(DEV_URL);
+        try {
+            await waitForDevServer(DEV_URL);
+        } catch (err) {
+            console.error('[Main] Failed to connect to renderer dev server:', err?.message || err);
+            app.exit(1);
+            return;
+        }
     }
+
     createWindow();
 
     app.on('activate', () => {
         if (BrowserWindow.getAllWindows().length === 0) createWindow();
     });
+}).catch((err) => {
+    console.error('[Main] Fatal startup error:', err?.message || err);
+    app.exit(1);
 });
 
 app.on('window-all-closed', async () => {

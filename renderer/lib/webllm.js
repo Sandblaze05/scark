@@ -213,7 +213,7 @@ export async function decideAskPageCap(userQuery) {
  * @param {'ask'|'research'} [mode]
  * @returns {Promise<{ actions: Array<{ tool: string, args: Record<string, string> }> }>}
  */
-export async function planActions(userQuery, mode = 'ask') {
+export async function planActions(userQuery, mode = 'ask', conversationHistory = []) {
     if (!_s.engine) return { actions: [] };
 
     const modeRules = mode === 'research'
@@ -231,11 +231,24 @@ export async function planActions(userQuery, mode = 'ask') {
             '- Only use web_search when current/uncertain facts are required.',
         ].join('\n');
 
+    // Include recent conversation history so the model can resolve
+    // follow-up references like "some other alternative?" or "tell me more".
+    const recentTurns = conversationHistory
+        .filter(m => m.role === 'user' || m.role === 'assistant')
+        .slice(-4);
+    let historyBlock = '';
+    if (recentTurns.length > 0) {
+        historyBlock = '\nRecent conversation (use this to understand follow-up questions):\n' +
+            recentTurns.map(m => `${m.role}: ${(m.content || '').slice(0, 200)}`).join('\n') +
+            '\n';
+    }
+
     const planMessages = [
         {
             role: 'system',
             content:
-                'You are a tool-planning agent. Given a user question, decide which tools (if any) would help answer it.\n\n' +
+                'You are a tool-planning agent. Given a user question and optional conversation history, decide which tools (if any) would help answer it.\n' +
+                'IMPORTANT: If the user\'s latest message is a follow-up (e.g. "any alternatives?", "tell me more", "what about X?"), you MUST use the conversation history to understand the actual topic, then write search queries about THAT topic. Never invent an unrelated topic.\n\n' +
                 'Available tools:\n' +
                 '  web_search(query)       – search the internet. Use when the question needs current, real-time, or factual data you are unsure about.\n' +
                 '  read_url(url)           – fetch a specific webpage. Use when the user mentions a specific website, link, source, or documentation.\n' +
@@ -244,7 +257,7 @@ export async function planActions(userQuery, mode = 'ask') {
                 modeRules + '\n\n' +
                 'Rules:\n' +
                 '- Output one tool call per line.\n' +
-                '- For web_search: write 2-4 short, keyword-focused queries (one web_search per query). Do NOT copy the user sentence verbatim.\n' +
+                '- For web_search: write 2-4 short, keyword-focused queries (one web_search per query). Do NOT copy the user sentence verbatim. Resolve any pronouns or references using conversation history.\n' +
                 '- For read_url: extract the exact URL from the user message.\n' +
                 '- For knowledge_search: write a concise search phrase.\n' +
                 '- You may combine tools (e.g. knowledge_search + web_search).\n' +
@@ -263,7 +276,12 @@ export async function planActions(userQuery, mode = 'ask') {
                 'read_url: https://react.dev/reference/react/useEffect\n' +
                 'web_search: React useEffect hook explained\n\n' +
                 'User: "What is 2 + 2?"\n' +
-                'none',
+                'none\n\n' +
+                'Conversation: user asked about Go TUI libraries, assistant answered with tview and bubbletea.\n' +
+                'User: "any other alternatives?"\n' +
+                'web_search: Go TUI library alternatives\n' +
+                'knowledge_search: Go terminal UI frameworks' +
+                historyBlock,
         },
         { role: 'user', content: userQuery },
     ];
