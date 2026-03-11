@@ -17,7 +17,9 @@ import {
   Sparkles,
   Command,
   Search,
-  FlaskConical
+  FlaskConical,
+  Mic,
+  Globe
 } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { cn } from '../lib/utils'
@@ -153,6 +155,24 @@ function TypingDots() {
   )
 }
 
+function SoundWave({ levels }) {
+  return (
+    <div className="flex items-center gap-[2px] h-6 px-1">
+      {levels.map((level, i) => (
+        <div
+          key={i}
+          className="w-[2.5px] rounded-full bg-violet-400 dark:bg-violet-300"
+          style={{
+            height: `${Math.max(3, level * 24)}px`,
+            opacity: 0.4 + level * 0.6,
+            transition: 'height 80ms ease-out, opacity 80ms ease-out',
+          }}
+        />
+      ))}
+    </div>
+  )
+}
+
 export default function Chat() {
   const [value, setValue] = useState("")
   const [attachments, setAttachments] = useState([])
@@ -165,6 +185,190 @@ export default function Chat() {
   const fileInputRef = useRef(null)
   const messagesEndRef = useRef(null)
   const scrollContainerRef = useRef(null)
+  const [isListening, setIsListening] = useState(false)
+  const [isTranscribing, setIsTranscribing] = useState(false)
+  const [transcriptionStatus, setTranscriptionStatus] = useState('')
+  const [audioLevels, setAudioLevels] = useState(new Array(24).fill(0))
+
+  const audioContextRef = useRef(null)
+  const analyserRef = useRef(null)
+  const animFrameRef = useRef(null)
+  const mediaStreamRef = useRef(null)
+  const preListenTextRef = useRef('')
+
+  // Whisper variables
+  const mediaRecorderRef = useRef(null)
+  const audioChunksRef = useRef([])
+  const workerRef = useRef(null)
+
+  // Initialize whisper worker
+  useEffect(() => {
+    workerRef.current = new Worker(new URL('../lib/whisperWorker.js', import.meta.url), {
+      type: 'module'
+    })
+
+    workerRef.current.addEventListener('message', (e) => {
+      const { status, text, data, error } = e.data
+
+      if (status === 'progress') {
+        if (data.status === 'downloading' || data.status === 'init') {
+          setTranscriptionStatus(`Loading AI Model... (${Math.round(data.progress || 0)}%)`)
+        }
+      } else if (status === 'decoding') {
+        setTranscriptionStatus('Transcribing audio...')
+      } else if (status === 'complete') {
+        setIsTranscribing(false)
+        setTranscriptionStatus('')
+        const pre = preListenTextRef.current
+        const sep = pre && !pre.endsWith(' ') ? ' ' : ''
+        setValue(pre + sep + text.trim())
+      } else if (status === 'error') {
+        console.error('Whisper worker error:', error)
+        setIsTranscribing(false)
+        setTranscriptionStatus('')
+      }
+    })
+
+    return () => {
+      if (workerRef.current) workerRef.current.terminate()
+    }
+  }, [])
+
+  // Cleanup audio resources only
+  const stopAudio = useCallback(() => {
+    if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current)
+    if (mediaStreamRef.current) mediaStreamRef.current.getTracks().forEach(t => t.stop())
+    if (audioContextRef.current && audioContextRef.current.state !== 'closed') audioContextRef.current.close()
+    audioContextRef.current = null
+    analyserRef.current = null
+    mediaStreamRef.current = null
+    setAudioLevels(new Array(24).fill(0))
+  }, [])
+
+  // Animate waveform from analyser
+  const animateWaveform = useCallback(() => {
+    const analyser = analyserRef.current
+    if (!analyser) return
+    const data = new Uint8Array(analyser.frequencyBinCount)
+    const tick = () => {
+      analyser.getByteFrequencyData(data)
+      const bars = 24
+      // Human voice is mostly below 8kHz. With fftSize=256 and sampleRate=48kHz, 
+      // bin resolution is ~187Hz. 40 bins * 187Hz = 7.5kHz.
+      // We take the first 48 bins and map them to 12 bars (since we mirror the other 12).
+      const usefulBins = 48 
+      const sliceSize = Math.floor(usefulBins / (bars / 2)) 
+      const rawLevels = []
+      for (let i = 0; i < bars / 2; i++) {
+        let sum = 0
+        for (let j = 0; j < sliceSize; j++) sum += data[i * sliceSize + j]
+        rawLevels.push(sum / sliceSize / 255)
+      }
+      
+      const levels = new Array(bars).fill(0)
+      for (let i = 0; i < bars / 2; i++) {
+        // Boost the higher frequencies slightly so edges move more visibly
+        const boost = 1 + (i / (bars / 2));
+        const val = Math.min(1, rawLevels[i] * boost);
+        levels[11 - i] = val; // Mirror left
+        levels[12 + i] = val; // Mirror right
+      }
+      setAudioLevels(levels)
+      animFrameRef.current = requestAnimationFrame(tick)
+    }
+    tick()
+  }, [])
+
+  // Accept: stop recording, encode audio, send to local AI model
+  const stopListening = useCallback(async () => {
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
+      mediaRecorderRef.current.stop()
+    }
+    stopAudio()
+    setIsListening(false)
+    setIsTranscribing(true)
+    setTranscriptionStatus('Processing audio...')
+
+    // Allow time for the final 'dataavailable' event to fire and chunks to be stored
+    setTimeout(async () => {
+      if (audioChunksRef.current.length === 0) {
+        setIsTranscribing(false)
+        return
+      }
+
+      try {
+        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' })
+
+        // Convert to 16kHz Float32Array for Whisper
+        const arrayBuffer = await audioBlob.arrayBuffer()
+        const audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 })
+        const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer)
+        const float32Data = audioBuffer.getChannelData(0)
+
+        // Send to background worker
+        workerRef.current.postMessage({ audio: float32Data })
+
+      } catch (err) {
+        console.error('Audio conversion error:', err)
+        setIsTranscribing(false)
+        setTranscriptionStatus('')
+      }
+    }, 100)
+  }, [stopAudio])
+
+  // Discard: stop recording, delete audio
+  const discardListening = useCallback(() => {
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
+      mediaRecorderRef.current.stop()
+    }
+    stopAudio()
+    setIsListening(false)
+  }, [stopAudio])
+
+  const startListening = useCallback(async () => {
+    if (isListening || isTranscribing) return
+
+    preListenTextRef.current = value
+    audioChunksRef.current = []
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      mediaStreamRef.current = stream
+
+      // Visualizer setup
+      const ctx = new (window.AudioContext || window.webkitAudioContext)()
+      audioContextRef.current = ctx
+      const source = ctx.createMediaStreamSource(stream)
+      const analyser = ctx.createAnalyser()
+      analyser.fftSize = 256
+      analyser.smoothingTimeConstant = 0.7
+      source.connect(analyser)
+      analyserRef.current = analyser
+
+      // Recording setup
+      const mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm' })
+      mediaRecorder.ondataavailable = (e) => {
+        if (e.data.size > 0) audioChunksRef.current.push(e.data)
+      }
+      mediaRecorderRef.current = mediaRecorder
+
+      mediaRecorder.start(200) // Collect chunks every 200ms
+      setIsListening(true)
+      animateWaveform()
+
+    } catch (err) {
+      console.error('Mic access denied:', err)
+      stopAudio()
+    }
+  }, [isListening, isTranscribing, value, stopAudio, animateWaveform])
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      if (mediaRecorderRef.current) mediaRecorderRef.current.stop()
+      stopAudio()
+    }
+  }, [stopAudio])
 
   // Animated Placeholder Logic
   const placeholders = [
@@ -203,6 +407,7 @@ export default function Chat() {
 
   // Backend Streaming States
   const [messages, setMessages] = useState([])
+  const [queuedMessage, setQueuedMessage] = useState(null)
   const [streamingContent, setStreamingContent] = useState('')
   const [status, setStatus] = useState('')
   const [sources, setSources] = useState([])
@@ -302,18 +507,86 @@ export default function Chat() {
       setIsTyping(false)
     })
     const removeError = window.scark.chat.onError((error) => {
-      setMessages(msgs => [...msgs, { role: 'assistant', content: `Error: ${error}` }])
+      // Ignore abort errors from showing in the UI chat log
+      if (error && typeof error === 'string' && error.includes('AbortError')) {
+         setStreamingContent(prev => {
+            if (prev) setMessages(msgs => [...msgs, { role: 'assistant', content: prev }])
+            return ''
+         })
+         setStatus('')
+         setIsTyping(false)
+         return
+      }
+      
+      setMessages(msgs => [...msgs, { role: 'assistant', content: `Error: ${error || 'Unknown error'}` }])
       setStreamingContent('')
       setStatus('')
       setIsTyping(false)
     })
     const removeStatus = window.scark.chat.onStatus(text => setStatus(text))
+    
+    // Clear chat arrays remotely
+    const removeNew = window.scark.chat.onNew(() => {
+      setMessages([])
+      setQueuedMessage(null)
+      setStreamingContent('')
+      setStatus('')
+      setSources([])
+      setIsTyping(false)
+      setValue('')
+      setAttachments([])
+    })
 
-    return () => { removeToken(); removeDone(); removeError(); removeStatus() }
+    return () => { removeToken(); removeDone(); removeError(); removeStatus(); removeNew() }
   }, [])
 
+  useEffect(() => {
+    if (!isTyping && queuedMessage) {
+      const q = queuedMessage;
+      setQueuedMessage(null);
+      executeSend(q.query, q.modeToUse, messages);
+    }
+  }, [isTyping, queuedMessage, messages])
+
+  const executeSend = async (queryText, queryMode, currentMessages) => {
+    const userMsg = { role: 'user', content: queryText }
+    const newMessages = [...currentMessages, userMsg]
+
+    setMessages(newMessages)
+    setIsTyping(true)
+    setStreamingContent('')
+    setSources([])
+    adjustHeight(true)
+
+    try {
+      if (window.scark?.chat) {
+        const result = await window.scark.chat.send({ messages: newMessages, topK: 5, mode: queryMode })
+        if (result?.aborted) {
+          // If aborted, keep it simple
+        } else if (result?.sources?.length > 0) {
+          setSources(result.sources)
+        }
+      } else {
+        // Mock delay if backend absent
+        setTimeout(() => setIsTyping(false), 2000)
+      }
+    } catch (err) {
+      const isAbort = err?.name === 'AbortError' || err?.message?.includes('AbortError') || err?.message?.includes('aborted');
+      if (!isAbort) {
+        setMessages(msgs => [...msgs, { role: 'assistant', content: `Error: ${err?.message || 'Unknown'}` }])
+      } else {
+         // Gracefully save whatever was streamed so far
+         setStreamingContent(prev => {
+            if (prev) setMessages(msgs => [...msgs, { role: 'assistant', content: prev }])
+            return ''
+         });
+      }
+      setIsTyping(false)
+    }
+  }
+
   const handleSendMessage = async () => {
-    if (!value.trim() || isTyping) return
+    if (!value.trim()) return
 
     let currentMode = mode
     let query = value.trim()
@@ -331,28 +604,22 @@ export default function Chat() {
 
     if (!query) return;
 
-    const userMsg = { role: 'user', content: query }
-    const newMessages = [...messages, userMsg]
-
-    setMessages(newMessages)
-    setValue('')
-    setIsTyping(true)
-    setStreamingContent('')
-    setSources([])
-    adjustHeight(true)
-
-    try {
-      if (window.scark?.chat) {
-        const result = await window.scark.chat.send({ messages: newMessages, topK: 5, mode: currentMode })
-        if (result?.sources?.length > 0) setSources(result.sources)
-      } else {
-        // Mock delay if backend absent
-        setTimeout(() => setIsTyping(false), 2000)
-      }
-    } catch (err) {
-      setMessages(msgs => [...msgs, { role: 'assistant', content: `Error: ${err.message}` }])
-      setIsTyping(false)
+    if (isTyping) {
+      setQueuedMessage({ query, modeToUse: currentMode })
+      setValue('')
+      adjustHeight(true)
+      return
     }
+
+    setValue('')
+    await executeSend(query, currentMode, messages)
+  }
+
+  const handleStopResponse = () => {
+    if (window.scark?.chat?.stop) {
+      window.scark.chat.stop()
+    }
+    setIsTyping(false)
   }
 
   const handleKeyDown = (e) => {
@@ -371,13 +638,14 @@ export default function Chat() {
       {/* Scrollable Messages Area */}
       <div
         ref={scrollContainerRef}
-        className="flex-1 overflow-y-auto px-6 py-6 space-y-6 scroll-smooth z-10 w-full max-w-4xl mx-auto flex flex-col"
+        className="flex-1 overflow-y-auto w-full scroll-smooth z-10"
         style={{ overflowAnchor: 'auto', overscrollBehaviorY: 'contain' }}
         onDragEnter={handleDrag}
         onDragLeave={handleDrag}
         onDragOver={handleDrag}
         onDrop={handleDrop}
       >
+        <div className="w-full max-w-5xl mx-auto px-6 py-6 pb-12 space-y-6 flex flex-col min-h-full">
         {messages.length === 0 && (
           <div className="flex-1 flex flex-col items-center justify-center space-y-4 pt-10">
             <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.2, duration: 0.5 }} className="inline-block text-center">
@@ -392,17 +660,56 @@ export default function Chat() {
 
         {messages.map((msg, i) => (
           <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-            <div className={`max-w-[80%] px-5 py-3 rounded-2xl whitespace-pre-wrap text-sm leading-relaxed ${msg.role === 'user'
+            <div className={`max-w-[80%] px-5 py-3 rounded-2xl whitespace-pre-wrap text-sm leading-snug ${msg.role === 'user'
               ? 'bg-primary text-primary-foreground dark:bg-white/10 dark:text-white bg-black/5 text-black'
               : 'dark:text-gray-200 text-gray-800'
               }`}>
               {msg.role === 'user' ? (
                 msg.content
               ) : (
-                <article className="prose prose-sm dark:prose-invert max-w-none prose-p:my-0 prose-pre:bg-transparent prose-pre:p-0 prose-headings:my-1 prose-ul:my-0 prose-li:my-0 pb-1 leading-normal">
+                <article 
+                  className="prose dark:prose-invert max-w-none prose-p:my-0 prose-pre:bg-transparent prose-pre:p-0 prose-headings:my-1 prose-ul:my-0 prose-li:my-0 pb-1 leading-snug"
+                  style={{ fontFamily: 'ui-serif, Georgia, Cambria, "Times New Roman", Times, serif', fontSize: '16px' }}
+                >
                   <ReactMarkdown
                     remarkPlugins={[remarkGfm, remarkBreaks, remarkExternalLinks]}
                     components={{
+                      a({ href, children }) {
+                        const isRawUrl = typeof children?.[0] === 'string' && children[0] === href;
+                        let displayText = children;
+                        let domain = '';
+                        
+                        try {
+                          const urlObj = new URL(href);
+                          domain = urlObj.hostname.replace(/^www\./, '');
+                        } catch (e) {
+                          domain = href;
+                        }
+
+                        if (isRawUrl) {
+                          displayText = domain + (href.length > domain.length + 8 ? '...' : '');
+                        }
+                        
+                        return (
+                          <span className="relative inline-block group mx-1 align-middle">
+                            <a href={href} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-black/5 dark:bg-white/10 hover:bg-black/10 dark:hover:bg-white/20 text-xs font-sans text-gray-700 dark:text-gray-300 no-underline transition-all ring-1 ring-black/5 dark:ring-white/10">
+                              <Globe className="w-3 h-3 opacity-70 shrink-0" />
+                              <span className="truncate max-w-[120px]">{domain}</span>
+                            </a>
+                            
+                            {/* Hover Card */}
+                            <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-64 p-3 bg-white dark:bg-[#1C1C1C] rounded-xl shadow-xl border border-black/5 dark:border-white/10 opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all duration-200 z-50 text-left font-sans flex flex-col gap-1.5 transform scale-95 group-hover:scale-100 origin-bottom pointer-events-none">
+                               <div className="flex items-center gap-2 text-xs font-semibold text-gray-700 dark:text-gray-300">
+                                  <Globe className="w-3.5 h-3.5 opacity-70 shrink-0" />
+                                  <span className="truncate">{domain}</span>
+                               </div>
+                               <div className="text-[13px] font-normal text-gray-600 dark:text-gray-400 line-clamp-3 leading-snug break-all">
+                                  {href}
+                               </div>
+                            </div>
+                          </span>
+                        );
+                      },
                       code({ node, inline, className, children, ...props }) {
                         const match = /language-(\w+)/.exec(className || '')
                         return !inline && match ? (
@@ -427,33 +734,87 @@ export default function Chat() {
           </motion.div>
         ))}
 
-        {isTyping && streamingContent && (
-          <div className="flex justify-start">
+        {/* LLM Thinking/Streaming State in the Main Chat Area (Like Claude/GPT) */}
+        {isTyping && (
+          <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="flex justify-start">
             <div className="max-w-[80%] px-5 py-3 rounded-2xl dark:text-gray-200 text-gray-800 whitespace-pre-wrap text-sm leading-relaxed">
-              <article className="prose prose-sm dark:prose-invert max-w-none prose-p:my-0 prose-headings:my-1 prose-ul:my-0 prose-li:my-0 pb-1 leading-normal overflow-hidden">
-                <ReactMarkdown
-                  remarkPlugins={[remarkGfm, remarkBreaks, remarkExternalLinks]}
-                  components={{
-                    code({ node, inline, className, children, ...props }) {
-                      const match = /language-(\w+)/.exec(className || '')
-                      // Use a simpler static block for streaming content to avoid heavy SyntaxHighlighter stutter/jitter
-                      return !inline && match ? (
-                        <div className="my-2 rounded-xl overflow-hidden border border-white/5 bg-[#121212] p-4 font-mono text-[0.85rem] whitespace-pre tabular-nums">
-                          {children}
-                        </div>
-                      ) : (
-                        <code className={cn("bg-black/10 dark:bg-white/10 px-1 rounded", className)} {...props}>
-                          {children}
-                        </code>
-                      )
-                    }
-                  }}
+              {!streamingContent ? (
+                /* Shimmering loader when not streaming tokens yet */
+                <div className="flex items-center gap-2 h-8">
+                  <Sparkles className="w-4 h-4 text-black dark:text-white animate-pulse" />
+                  <span 
+                    className="font-medium tracking-wide bg-clip-text text-transparent bg-size-[200%_auto] animate-shimmer"
+                    style={{ backgroundImage: 'linear-gradient(90deg, var(--color-foreground) 0%, gray 50%, var(--color-foreground) 100%)' }}
+                  >
+                    Thinking deeply...
+                  </span>
+                </div>
+              ) : (
+                /* Streaming text view */
+                <article 
+                  className="prose dark:prose-invert max-w-none prose-p:my-0 prose-pre:bg-transparent prose-pre:p-0 prose-headings:my-1 prose-ul:my-0 prose-li:my-0 pb-1 leading-snug overflow-hidden"
+                  style={{ fontFamily: 'ui-serif, Georgia, Cambria, "Times New Roman", Times, serif', fontSize: '16px' }}
                 >
-                  {streamingContent + '`▍`'}
-                </ReactMarkdown>
-              </article>
+                  <ReactMarkdown
+                    remarkPlugins={[remarkGfm, remarkBreaks, remarkExternalLinks]}
+                    components={{
+                      a({ href, children }) {
+                        const isRawUrl = typeof children?.[0] === 'string' && children[0] === href;
+                        let displayText = children;
+                        let domain = '';
+                        
+                        try {
+                          const urlObj = new URL(href);
+                          domain = urlObj.hostname.replace(/^www\./, '');
+                        } catch (e) {
+                          domain = href;
+                        }
+
+                        if (isRawUrl) {
+                          displayText = domain + (href.length > domain.length + 8 ? '...' : '');
+                        }
+                        
+                        return (
+                          <span className="relative inline-block group mx-1 align-middle">
+                            <a href={href} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-black/5 dark:bg-white/10 hover:bg-black/10 dark:hover:bg-white/20 text-xs font-sans text-gray-700 dark:text-gray-300 no-underline transition-all ring-1 ring-black/5 dark:ring-white/10">
+                              <Globe className="w-3 h-3 opacity-70 shrink-0" />
+                              <span className="truncate max-w-[120px]">{domain}</span>
+                            </a>
+                            
+                            {/* Hover Card */}
+                            <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-64 p-3 bg-white dark:bg-[#1C1C1C] rounded-xl shadow-xl border border-black/5 dark:border-white/10 opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all duration-200 z-50 text-left font-sans flex flex-col gap-1.5 transform scale-95 group-hover:scale-100 origin-bottom pointer-events-none">
+                               <div className="flex items-center gap-2 text-xs font-semibold text-gray-700 dark:text-gray-300">
+                                  <Globe className="w-3.5 h-3.5 opacity-70 shrink-0" />
+                                  <span className="truncate">{domain}</span>
+                               </div>
+                               <div className="text-[13px] font-normal text-gray-600 dark:text-gray-400 line-clamp-3 leading-snug break-all">
+                                  {href}
+                               </div>
+                            </div>
+                          </span>
+                        );
+                      },
+                      code({ node, inline, className, children, ...props }) {
+                        const match = /language-(\w+)/.exec(className || '')
+                        // Use a simpler static block for streaming content to avoid heavy SyntaxHighlighter stutter/jitter
+                        return !inline && match ? (
+                          <div className="my-2 rounded-xl overflow-hidden border border-white/5 bg-[#121212] p-4 font-mono text-[0.85rem] whitespace-pre tabular-nums">
+                            {children}
+                          </div>
+                        ) : (
+                          <code className={cn("bg-black/10 dark:bg-white/10 px-1 rounded", className)} {...props}>
+                            {children}
+                          </code>
+                        )
+                      }
+                    }}
+                  >
+                    {streamingContent + '`▍`'}
+                  </ReactMarkdown>
+                </article>
+              )}
             </div>
-          </div>
+          </motion.div>
         )}
 
         {sources.length > 0 && !isTyping && (
@@ -465,6 +826,7 @@ export default function Chat() {
           </motion.div>
         )}
         <div ref={messagesEndRef} className="h-4 shrink-0" />
+        </div>
       </div>
 
       {/* Input Footer Area */}
@@ -520,41 +882,49 @@ export default function Chat() {
             </div>
           )}
 
-          <div className="p-4 relative group">
-            <Textarea
-              ref={textareaRef}
-              value={value}
-              onChange={e => { setValue(e.target.value); adjustHeight() }}
-              onKeyDown={handleKeyDown}
-              onPaste={handlePaste}
-              onFocus={() => setInputFocused(true)}
-              onBlur={() => setInputFocused(false)}
-              placeholder=""
-              containerClassName="w-full relative z-10"
-              className="w-full px-4 py-[12px] resize-none bg-transparent border-none text-foreground text-sm focus:outline-none placeholder:text-muted-foreground min-h-[44px]"
-              style={{ overflow: "hidden" }}
-              showRing={false}
-            />
-
-            {/* Overlapping animated placeholder perfectly aligned with px-4 py-[12px] padding */}
-            <div className={`absolute top-4 left-4 right-4 h-[44px] flex px-4 py-[12px] pointer-events-none z-0`}>
-              <AnimatePresence mode="wait">
-                {isTyping && !streamingContent ? (
-                  <motion.div
-                    key="thinking-status"
-                    initial={{ opacity: 0, scale: 0.95 }}
-                    animate={{ opacity: 1, scale: 1 }}
-                    exit={{ opacity: 0, scale: 0.95 }}
-                    transition={{ duration: 0.2 }}
-                    className="flex items-center gap-2 -mt-1 -ml-2 bg-black/5 dark:bg-white/10 rounded-full px-4 py-1.5 shadow-sm border border-black/5 dark:border-white/5"
-                  >
-                    <span className="text-xs font-semibold text-foreground/80">
-                      {status || 'Thinking'}
+          <div className="p-4 flex flex-col relative group">
+            {/* Only transcription status sits above the input field now */}
+            <AnimatePresence>
+              {isTranscribing && (
+                <motion.div
+                  key="transcribing-status"
+                  initial={{ opacity: 0, height: 0, marginBottom: 0 }}
+                  animate={{ opacity: 1, height: 'auto', marginBottom: 12 }}
+                  exit={{ opacity: 0, height: 0, marginBottom: 0 }}
+                  transition={{ duration: 0.2 }}
+                  className="overflow-hidden w-full flex"
+                >
+                  {/* Keep text above textinput on far left margin properly */}
+                  <div className="flex items-center gap-2 w-fit bg-black/5 dark:bg-white/10 rounded-full px-4 py-1.5 shadow-sm border border-black/5 dark:border-white/5 mt-1 ml-0.5">
+                    <span className="text-xs font-semibold text-foreground/80 whitespace-nowrap">
+                      {transcriptionStatus}
                     </span>
                     <TypingDots />
-                  </motion.div>
-                ) : (
-                  (!value && !inputFocused) && (
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
+
+            <div className="relative w-full z-10">
+              <Textarea
+                ref={textareaRef}
+                value={value}
+                onChange={e => { setValue(e.target.value); adjustHeight() }}
+                onKeyDown={handleKeyDown}
+                onPaste={handlePaste}
+                onFocus={() => setInputFocused(true)}
+                onBlur={() => setInputFocused(false)}
+                placeholder=""
+                containerClassName="w-full relative z-10"
+                className="w-full px-4 py-[12px] resize-none bg-transparent border-none text-foreground text-sm focus:outline-none placeholder:text-muted-foreground min-h-[44px]"
+                style={{ overflow: "hidden" }}
+                showRing={false}
+              />
+
+              {/* Overlapping animated placeholder aligned with px-4 py-[12px] padding */}
+              <div className="absolute top-0 left-0 right-0 h-[44px] flex px-4 py-[12px] pointer-events-none z-0">
+                <AnimatePresence mode="wait">
+                  {!value && !inputFocused && !isTranscribing && (
                     <motion.p
                       initial={{ y: 5, opacity: 0 }}
                       key={`current-placeholder-${currentPlaceholder}`}
@@ -565,9 +935,9 @@ export default function Chat() {
                     >
                       {placeholders[currentPlaceholder]}
                     </motion.p>
-                  )
-                )}
-              </AnimatePresence>
+                  )}
+                </AnimatePresence>
+              </div>
             </div>
           </div>
 
@@ -576,6 +946,36 @@ export default function Chat() {
             <div className="flex items-center gap-3">
               <input type="file" multiple ref={fileInputRef} className="hidden" onChange={handleFileChange} />
               <button onClick={() => fileInputRef.current?.click()} className="p-2 text-muted-foreground hover:text-foreground rounded-lg transition-colors cursor-pointer hover:bg-black/5 dark:hover:bg-white/5" title="Attach file"><Paperclip className="w-4 h-4" /></button>
+              {isListening ? (
+                <div className="flex items-center gap-1.5">
+                  <SoundWave levels={audioLevels} />
+                  <button
+                    onClick={discardListening}
+                    disabled={isTranscribing}
+                    className="p-1.5 rounded-full bg-black/5 dark:bg-white/10 text-muted-foreground hover:text-foreground hover:bg-black/10 dark:hover:bg-white/20 transition-colors cursor-pointer disabled:opacity-50"
+                    title="Discard"
+                  >
+                    <XIcon className="w-3.5 h-3.5" />
+                  </button>
+                  <button
+                    onClick={stopListening}
+                    disabled={isTranscribing}
+                    className="p-1.5 rounded-full bg-violet-500/15 text-violet-500 dark:text-violet-300 hover:bg-violet-500/25 transition-colors cursor-pointer disabled:opacity-50"
+                    title="Accept"
+                  >
+                    <Check className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              ) : (
+                <button
+                  onClick={startListening}
+                  disabled={isTranscribing}
+                  className="p-2 rounded-lg transition-all cursor-pointer text-muted-foreground hover:text-foreground hover:bg-black/5 dark:hover:bg-white/5 disabled:opacity-50"
+                  title={isTranscribing ? "Transcribing..." : "Voice input"}
+                >
+                  <Mic className="w-4 h-4" />
+                </button>
+              )}
 
               <div className="flex items-center p-0.5 dark:bg-black/20 bg-black/5 rounded-lg border dark:border-white/5 border-black/5 h-[34px] ml-1">
                 <button onClick={() => setMode('ask')} className={cn("px-3 h-full rounded-md text-xs font-medium transition-all flex items-center gap-1.5 cursor-pointer", mode === 'ask' ? "bg-white dark:bg-[#333] text-black dark:text-white shadow-xs" : "text-muted-foreground hover:text-foreground")}>
@@ -588,10 +988,45 @@ export default function Chat() {
               </div>
             </div>
 
-            <motion.button onClick={handleSendMessage} whileHover={{ scale: 1.01 }} whileTap={{ scale: 0.98 }} disabled={isTyping || !value.trim()} className={cn("px-4 py-2 rounded-lg text-sm font-medium transition-all flex items-center gap-2 cursor-pointer disabled:opacity-50", value.trim() ? "dark:bg-white bg-black dark:text-[#0A0A0B] text-white shadow-lg" : "dark:bg-white/5 bg-black/5 text-muted-foreground")}>
-              {isTyping ? <LoaderIcon className="w-4 h-4 animate-[spin_2s_linear_infinite]" /> : <SendIcon className="w-4 h-4" />}
-              <span>Send</span>
-            </motion.button>
+            <div className="flex items-center gap-2 relative">
+              <AnimatePresence mode="wait">
+                {isTyping && !value.trim() ? (
+                  <motion.button 
+                    key="stop-btn"
+                    initial={{ opacity: 0, scale: 0.8 }}
+                    animate={{ opacity: 1, scale: 1 }}
+                    exit={{ opacity: 0, scale: 0.8 }}
+                    onClick={handleStopResponse} 
+                    whileHover={{ scale: 1.05 }} 
+                    whileTap={{ scale: 0.95 }} 
+                    className="w-[88px] h-9 flex items-center justify-center gap-2 rounded-lg text-sm font-medium transition-all cursor-pointer bg-red-500/10 text-red-500 hover:bg-red-500/20 dark:bg-red-500/15 dark:hover:bg-red-500/25"
+                  >
+                    <div className="w-2.5 h-2.5 rounded-[2px] bg-current" />
+                    <span>Stop</span>
+                  </motion.button>
+                ) : (
+                  <motion.button 
+                    key="action-btn"
+                    initial={{ opacity: 0, scale: 0.8 }}
+                    animate={{ opacity: 1, scale: 1 }}
+                    exit={{ opacity: 0, scale: 0.8 }}
+                    onClick={handleSendMessage} 
+                    whileHover={{ scale: 1.02 }} 
+                    whileTap={{ scale: 0.98 }} 
+                    disabled={!value.trim()} 
+                    className={cn(
+                      "min-w-[88px] h-9 px-4 rounded-lg text-sm font-medium transition-all flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50", 
+                      value.trim() 
+                        ? (isTyping ? "bg-violet-500 text-white shadow-lg hover:bg-violet-600 shadow-violet-500/25" : "dark:bg-white bg-black dark:text-[#0A0A0B] text-white shadow-lg") 
+                        : "dark:bg-white/5 bg-black/5 text-muted-foreground"
+                    )}
+                  >
+                    {isTyping && value.trim() ? <PlusIcon className="w-4 h-4" /> : <SendIcon className="w-4 h-4" />}
+                    <span>{isTyping && value.trim() ? 'Queue' : 'Send'}</span>
+                  </motion.button>
+                )}
+              </AnimatePresence>
+            </div>
           </div>
         </motion.div>
 

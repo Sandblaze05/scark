@@ -132,11 +132,20 @@ export function buildSystemPrompt(contextChunks) {
 export async function* streamChat(messages, opts = {}) {
     const model = opts.model || CHAT_MODEL;
 
-    const res = await fetch(`${OLLAMA_BASE_URL}/api/chat`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model, messages, stream: true }),
-    });
+    let res;
+    try {
+        res = await fetch(`${OLLAMA_BASE_URL}/api/chat`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ model, messages, stream: true }),
+            signal: opts.signal,
+        });
+    } catch (fetchErr) {
+        if (fetchErr.name === 'AbortError') {
+            throw fetchErr; // Re-throw to be caught cleanly by main process
+        }
+        throw fetchErr;
+    }
 
     if (!res.ok) {
         const body = await res.text();
@@ -175,6 +184,9 @@ export async function* streamChat(messages, opts = {}) {
                 }
             } catch { /* ignore */ }
         }
+    } catch (readErr) {
+        if (readErr.name === 'AbortError') throw readErr;
+        // else ignore transient read errors
     } finally {
         reader.releaseLock();
     }

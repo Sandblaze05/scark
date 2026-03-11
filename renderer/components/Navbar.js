@@ -101,11 +101,17 @@ const Navbar = () => {
         <div className="px-3 space-y-1">
           {/* New Chat Button */}
           {isCollapsed ? (
-            <button className="w-full p-2 mb-2 hover:bg-zinc-200 dark:hover:bg-[#202123] rounded-md flex justify-center transition-colors text-gray-800 dark:text-gray-200">
+            <button 
+              onClick={() => window.scark?.chat?.triggerNew?.()}
+              className="w-full p-2 mb-2 hover:bg-zinc-200 dark:hover:bg-[#202123] rounded-md flex justify-center transition-colors text-gray-800 dark:text-gray-200"
+            >
               <SquarePen size={20} />
             </button>
           ) : (
-            <div className="flex items-center justify-between mb-4 group cursor-pointer hover:bg-zinc-200 dark:hover:bg-[#202123] rounded-lg p-2 transition-colors">
+            <div 
+              onClick={() => window.scark?.chat?.triggerNew?.()}
+              className="flex items-center justify-between mb-4 group cursor-pointer hover:bg-zinc-200 dark:hover:bg-[#202123] rounded-lg p-2 transition-colors"
+            >
               <div className="flex items-center gap-2 text-gray-800 dark:text-gray-200 font-medium">
                 <svg viewBox="0 0 24 24" width="24" height="24" stroke="currentColor" strokeWidth="2" fill="none" strokeLinecap="round" strokeLinejoin="round" className="w-5 h-5">
                   <path d="M12 20h9"></path>
@@ -210,14 +216,43 @@ const Navbar = () => {
       <div className="p-3 mt-auto border-t border-zinc-200 dark:border-white/10 flex flex-col gap-1">
 
         {mounted && (
-          <button
-            onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
-            className={`flex items-center gap-3 w-full p-2 hover:bg-zinc-200 dark:hover:bg-[#202123] rounded-lg transition-colors text-sm text-gray-800 dark:text-gray-200 ${isCollapsed ? 'justify-center' : ''}`}
-            title="Toggle Theme"
-          >
-            {theme === 'dark' ? <Sun size={isCollapsed ? 20 : 18} className="shrink-0 text-yellow-500" /> : <Moon size={isCollapsed ? 20 : 18} className="shrink-0 text-gray-700" />}
-            {!isCollapsed && <span className="font-semibold">{theme === 'dark' ? 'Light Mode' : 'Dark Mode'}</span>}
-          </button>
+          isCollapsed ? (
+            <button
+              onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
+              className="p-2 mx-auto hover:bg-zinc-200 dark:hover:bg-[#202123] rounded-lg transition-colors"
+              title="Toggle Theme"
+            >
+              {theme === 'dark' ? <Sun size={20} className="text-yellow-400" /> : <Moon size={20} className="text-gray-700" />}
+            </button>
+          ) : (
+            <div className="flex items-center gap-3 w-full p-2 rounded-lg">
+              <button
+                onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
+                className="relative w-14 h-7 rounded-full cursor-pointer transition-colors duration-300 flex items-center shrink-0"
+                style={{ backgroundColor: theme === 'dark' ? '#334155' : '#cbd5e1' }}
+                title="Toggle Theme"
+                aria-label="Toggle Theme"
+              >
+                {/* Track icons */}
+                <Sun size={12} className="absolute left-1.5 top-1/2 -translate-y-1/2 text-yellow-400 transition-opacity duration-300" style={{ opacity: theme === 'dark' ? 0.4 : 0 }} />
+                <Moon size={12} className="absolute right-1.5 top-1/2 -translate-y-1/2 text-blue-300 transition-opacity duration-300" style={{ opacity: theme === 'dark' ? 0 : 0.4 }} />
+                {/* Sliding knob */}
+                <span
+                  className="absolute top-0.5 w-6 h-6 rounded-full shadow-md flex items-center justify-center transition-all duration-300"
+                  style={{
+                    left: theme === 'dark' ? '2px' : 'calc(100% - 26px)',
+                    backgroundColor: theme === 'dark' ? '#1e293b' : '#ffffff',
+                  }}
+                >
+                  {theme === 'dark'
+                    ? <Moon size={13} className="text-blue-300" />
+                    : <Sun size={13} className="text-yellow-500" />
+                  }
+                </span>
+              </button>
+              <span className="text-sm font-semibold text-gray-800 dark:text-gray-200">{theme === 'dark' ? 'Dark' : 'Light'}</span>
+            </div>
+          )
         )}
 
         <button className={`flex items-center gap-3 w-full p-2 hover:bg-zinc-200 dark:hover:bg-[#202123] rounded-lg transition-colors text-sm text-gray-800 dark:text-gray-200 ${isCollapsed ? 'justify-center' : ''}`}>
