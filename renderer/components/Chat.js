@@ -30,6 +30,7 @@ import remarkExternalLinks from 'remark-external-links'
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism'
 import { Copy, Check } from 'lucide-react'
+import { initEngine, streamChat as webllmStreamChat, isEngineReady, DEFAULT_MODEL, planActions } from '../lib/webllm'
 
 const CodeBlock = React.memo(function CodeBlock({ language, value }) {
   const [copied, setCopied] = useState(false)
@@ -157,7 +158,7 @@ function TypingDots() {
 
 function SoundWave({ levels }) {
   return (
-    <div className="flex items-center gap-[2px] h-6 px-1">
+    <div className="flex items-center gap-0.5 h-6 px-1">
       {levels.map((level, i) => (
         <div
           key={i}
@@ -201,6 +202,14 @@ export default function Chat() {
   const audioChunksRef = useRef([])
   const workerRef = useRef(null)
 
+  // WebLLM abort controller – set before each generation, cleared on stop/done
+  const webllmAbortRef = useRef(null)
+
+  // WebLLM model loading state
+  const [modelLoading, setModelLoading] = useState(true)
+  const [modelProgress, setModelProgress] = useState('')
+  const [modelProgressPercent, setModelProgressPercent] = useState(0)
+
   // Initialize whisper worker
   useEffect(() => {
     workerRef.current = new Worker(new URL('../lib/whisperWorker.js', import.meta.url), {
@@ -232,6 +241,23 @@ export default function Chat() {
     return () => {
       if (workerRef.current) workerRef.current.terminate()
     }
+  }, [])
+
+  // Initialise WebLLM engine (downloads & caches model on first run)
+  useEffect(() => {
+    initEngine(DEFAULT_MODEL, (report) => {
+      const pct = Math.round((report.progress ?? 0) * 100)
+      setModelProgressPercent(pct)
+      setModelProgress(report.text || `Loading model… ${pct}%`)
+    }).then(() => {
+      setModelProgressPercent(100)
+      setModelLoading(false)
+      setModelProgress('')
+    }).catch(err => {
+      console.error('[WebLLM] Init failed:', err)
+      setModelLoading(false)
+      setModelProgress('Model failed to load. Check WebGPU support.')
+    })
   }, [])
 
   // Cleanup audio resources only
@@ -495,38 +521,25 @@ export default function Chat() {
   }, [messages, streamingContent, isTyping])
 
   // IPC Streaming Listeners
+  // IPC listeners – only context-retrieval status/errors/new-chat signals now.
+  // Token streaming is handled locally by WebLLM.
   useEffect(() => {
     if (typeof window === 'undefined' || !window.scark?.chat) return
 
-    const removeToken = window.scark.chat.onToken((token) => setStreamingContent(prev => prev + token))
-    const removeDone = window.scark.chat.onDone(() => {
-      setStreamingContent(prev => {
-        if (prev) setMessages(msgs => [...msgs, { role: 'assistant', content: prev }])
-        return ''
-      })
-      setIsTyping(false)
-    })
     const removeError = window.scark.chat.onError((error) => {
-      // Ignore abort errors from showing in the UI chat log
-      if (error && typeof error === 'string' && error.includes('AbortError')) {
-         setStreamingContent(prev => {
-            if (prev) setMessages(msgs => [...msgs, { role: 'assistant', content: prev }])
-            return ''
-         })
-         setStatus('')
-         setIsTyping(false)
-         return
-      }
-      
-      setMessages(msgs => [...msgs, { role: 'assistant', content: `Error: ${error || 'Unknown error'}` }])
+      setMessages(msgs => [...msgs, { role: 'assistant', content: `Error retrieving context: ${error || 'Unknown error'}` }])
       setStreamingContent('')
       setStatus('')
       setIsTyping(false)
     })
     const removeStatus = window.scark.chat.onStatus(text => setStatus(text))
-    
-    // Clear chat arrays remotely
+
+    // Clear chat state on new-chat signal (e.g. from Navbar)
     const removeNew = window.scark.chat.onNew(() => {
+      if (webllmAbortRef.current) {
+        webllmAbortRef.current.abort()
+        webllmAbortRef.current = null
+      }
       setMessages([])
       setQueuedMessage(null)
       setStreamingContent('')
@@ -537,7 +550,7 @@ export default function Chat() {
       setAttachments([])
     })
 
-    return () => { removeToken(); removeDone(); removeError(); removeStatus(); removeNew() }
+    return () => { removeError(); removeStatus(); removeNew() }
   }, [])
 
   useEffect(() => {
@@ -558,31 +571,181 @@ export default function Chat() {
     setSources([])
     adjustHeight(true)
 
-    try {
-      if (window.scark?.chat) {
-        const result = await window.scark.chat.send({ messages: newMessages, topK: 5, mode: queryMode })
-        if (result?.aborted) {
-          // If aborted, keep it simple
-        } else if (result?.sources?.length > 0) {
-          setSources(result.sources)
+    // 1. Retrieve context — strategy differs by mode
+    let context = null
+
+    if (queryMode === 'ask' && window.scark?.chat) {
+      // Ask mode: let the model decide which tools to use (web search, URL read,
+      // local knowledge, or nothing). Execute all chosen actions in parallel,
+      // then merge results into a unified context for the final answer.
+      const { actions } = await planActions(queryText);
+
+      if (actions.length > 0) {
+        const toolLabels = [...new Set(actions.map(a => a.tool))].join(', ');
+        setStatus(`Running tools: ${toolLabels}…`);
+
+        // Batch all web_search queries into ONE call (single browser launch)
+        const webQueries = actions.filter(a => a.tool === 'web_search').map(a => a.args.query);
+        const otherActions = actions.filter(a => a.tool !== 'web_search');
+
+        const toolPromises = [];
+
+        // Single batched web search for all queries
+        if (webQueries.length > 0 && window.scark?.query?.batchWebsearch) {
+          toolPromises.push(
+            window.scark.query.batchWebsearch(webQueries, 5).then(hits =>
+              (hits ?? []).map(r => ({ type: 'web', title: r.title, url: r.url, text: r.text }))
+            ).catch(() => [])
+          );
         }
-      } else {
-        // Mock delay if backend absent
-        setTimeout(() => setIsTyping(false), 2000)
+
+        // Execute remaining actions (read_url, knowledge_search) in parallel
+        for (const action of otherActions) {
+          toolPromises.push((async () => {
+            try {
+              switch (action.tool) {
+                case 'read_url': {
+                  if (!window.scark?.query?.fetchUrl) return [];
+                  const page = await window.scark.query.fetchUrl(action.args.url);
+                  if (!page) return [];
+                  return [{
+                    type: 'url',
+                    title: page.title || action.args.url,
+                    url: action.args.url,
+                    text: page.text,
+                  }];
+                }
+                case 'knowledge_search': {
+                  const kbCtx = await window.scark.chat.getContext({
+                    messages: [{ role: 'user', content: action.args.query }],
+                    topK: 5,
+                    mode: 'ask',
+                  }).catch(() => null);
+                  if (!kbCtx?.success) return [];
+                  return (kbCtx.sources ?? []).map((s, i) => ({
+                    type: 'knowledge',
+                    title: s.title,
+                    url: s.url,
+                    text: '',
+                    _systemPrompt: i === 0 ? kbCtx.systemPrompt : null,
+                  }));
+                }
+                default:
+                  return [];
+              }
+            } catch (e) {
+              console.warn(`[Ask] Tool ${action.tool} failed:`, e.message);
+              return [];
+            }
+          })());
+        }
+
+        const results = await Promise.all(toolPromises);
+
+        // Flatten and deduplicate by URL
+        const seen = new Set();
+        const allResults = results.flat().filter(r => {
+          if (!r.url || seen.has(r.url)) return false;
+          seen.add(r.url);
+          return true;
+        });
+
+        if (allResults.length > 0) {
+          const kbPrompt = allResults.find(r => r._systemPrompt)?._systemPrompt;
+          const webAndUrlResults = allResults.filter(r => r.type === 'web' || r.type === 'url');
+
+          if (webAndUrlResults.length > 0) {
+            // Budget-trim: ~4 chars per token, cap context at 1800 tokens
+            // so conversation history + system boilerplate still fit the 3200-token prompt budget
+            const CONTEXT_CHAR_BUDGET = 1800 * 4;
+            let contextText = '';
+            let usedChars = 0;
+            let sourceIdx = 0;
+            for (const r of webAndUrlResults) {
+              const entry = `[${sourceIdx + 1}] ${r.title}\n${r.text}\n\n`;
+              if (usedChars + entry.length > CONTEXT_CHAR_BUDGET && sourceIdx > 0) break;
+              contextText += entry;
+              usedChars += entry.length;
+              sourceIdx++;
+            }
+
+            const sysPrompt = kbPrompt
+              ? `${kbPrompt}\n\nAdditional web/source results:\n\n${contextText}`
+              : `You are a helpful assistant. Use the following information to answer accurately.\n\n${contextText}`;
+            context = {
+              success: true,
+              systemPrompt: sysPrompt,
+              sources: allResults.slice(0, sourceIdx + (kbPrompt ? allResults.filter(r => r.type === 'knowledge').length : 0))
+                .map(r => ({ title: r.title, url: r.url })),
+            };
+          } else if (kbPrompt) {
+            context = {
+              success: true,
+              systemPrompt: kbPrompt,
+              sources: allResults.map(r => ({ title: r.title, url: r.url })),
+            };
+          }
+        }
+
+        setStatus('');
+      }
+
+      // Fall back to quick ChromaDB context if no actions were planned or all failed
+      if (!context && window.scark?.chat) {
+        const chromaCtx = await window.scark.chat.getContext({ messages: newMessages, topK: 5, mode: 'ask' }).catch(() => null);
+        if (chromaCtx?.success) context = chromaCtx;
+      }
+
+    } else if (window.scark?.chat) {
+      // Research mode: full pipeline — intentional wait, web content is the answer
+      try {
+        context = await window.scark.chat.getContext({ messages: newMessages, topK: 5, mode: queryMode })
+      } catch (err) {
+        setMessages(msgs => [...msgs, { role: 'assistant', content: `Error fetching context: ${err?.message || 'Unknown'}` }])
+        setIsTyping(false)
+        return
+      }
+      if (!context?.success) {
+        setMessages(msgs => [...msgs, { role: 'assistant', content: `Error: ${context?.error || 'Context retrieval failed'}` }])
+        setIsTyping(false)
+        return
+      }
+    }
+
+    // 2. Build full message list including retrieved system prompt
+    const fullMessages = context
+      ? [{ role: 'system', content: context.systemPrompt }, ...newMessages]
+      : newMessages
+
+    // 3. Stream completion locally via WebLLM
+    const abortCtrl = new AbortController()
+    webllmAbortRef.current = abortCtrl
+
+    try {
+      for await (const token of webllmStreamChat(fullMessages, { signal: abortCtrl.signal })) {
+        setStreamingContent(prev => prev + token)
       }
     } catch (err) {
-      const isAbort = err?.name === 'AbortError' || err?.message?.includes('AbortError') || err?.message?.includes('aborted');
+      const isAbort = abortCtrl.signal.aborted || err?.name === 'AbortError'
       if (!isAbort) {
-        setMessages(msgs => [...msgs, { role: 'assistant', content: `Error: ${err?.message || 'Unknown'}` }])
-      } else {
-         // Gracefully save whatever was streamed so far
-         setStreamingContent(prev => {
-            if (prev) setMessages(msgs => [...msgs, { role: 'assistant', content: prev }])
-            return ''
-         });
+        const msg = err instanceof Error
+          ? err.message
+          : (typeof err === 'string' ? err : (err?.message ?? JSON.stringify(err)))
+        setMessages(msgs => [...msgs, { role: 'assistant', content: `Error: ${msg || 'Unknown inference error'}` }])
+        setStreamingContent('')
+        setIsTyping(false)
+        return
       }
-      setIsTyping(false)
     }
+
+    // 4. Commit streamed tokens as a message
+    setStreamingContent(prev => {
+      if (prev) setMessages(msgs => [...msgs, { role: 'assistant', content: prev }])
+      return ''
+    })
+    if (context?.sources?.length > 0) setSources(context.sources)
+    webllmAbortRef.current = null
+    setIsTyping(false)
   }
 
   const handleSendMessage = async () => {
@@ -616,9 +779,15 @@ export default function Chat() {
   }
 
   const handleStopResponse = () => {
-    if (window.scark?.chat?.stop) {
-      window.scark.chat.stop()
+    if (webllmAbortRef.current) {
+      webllmAbortRef.current.abort()
+      webllmAbortRef.current = null
     }
+    // Commit any partial streamed response
+    setStreamingContent(prev => {
+      if (prev) setMessages(msgs => [...msgs, { role: 'assistant', content: prev }])
+      return ''
+    })
     setIsTyping(false)
   }
 
@@ -694,7 +863,7 @@ export default function Chat() {
                           <span className="relative inline-block group mx-1 align-middle">
                             <a href={href} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-black/5 dark:bg-white/10 hover:bg-black/10 dark:hover:bg-white/20 text-xs font-sans text-gray-700 dark:text-gray-300 no-underline transition-all ring-1 ring-black/5 dark:ring-white/10">
                               <Globe className="w-3 h-3 opacity-70 shrink-0" />
-                              <span className="truncate max-w-[120px]">{domain}</span>
+                              <span className="truncate max-w-30">{domain}</span>
                             </a>
                             
                             {/* Hover Card */}
@@ -778,7 +947,7 @@ export default function Chat() {
                           <span className="relative inline-block group mx-1 align-middle">
                             <a href={href} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-black/5 dark:bg-white/10 hover:bg-black/10 dark:hover:bg-white/20 text-xs font-sans text-gray-700 dark:text-gray-300 no-underline transition-all ring-1 ring-black/5 dark:ring-white/10">
                               <Globe className="w-3 h-3 opacity-70 shrink-0" />
-                              <span className="truncate max-w-[120px]">{domain}</span>
+                              <span className="truncate max-w-30">{domain}</span>
                             </a>
                             
                             {/* Hover Card */}
@@ -831,6 +1000,43 @@ export default function Chat() {
 
       {/* Input Footer Area */}
       <div className="shrink-0 p-4 max-w-3xl mx-auto w-full z-20 pb-8">
+
+        {/* WebLLM model loading banner – blocks input and shows real progress */}
+        <AnimatePresence>
+          {modelLoading && (
+            <motion.div
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: 6 }}
+              className="mb-3 px-4 py-3 rounded-xl dark:bg-white/5 bg-black/5 border dark:border-white/5 border-black/5"
+            >
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-xs font-medium dark:text-white/70 text-black/70 inline-flex items-center gap-1.5">
+                  <LoaderIcon className="w-3 h-3 animate-spin shrink-0" />
+                  Loading local AI model
+                </span>
+                <span className="text-xs font-mono tabular-nums dark:text-white/40 text-black/40">
+                  {modelProgressPercent}%
+                </span>
+              </div>
+              {/* Progress bar */}
+              <div className="w-full h-1 rounded-full overflow-hidden dark:bg-white/10 bg-black/10">
+                <motion.div
+                  className="h-full bg-violet-500 rounded-full"
+                  initial={{ width: '0%' }}
+                  animate={{ width: `${modelProgressPercent}%` }}
+                  transition={{ ease: 'linear', duration: 0.25 }}
+                />
+              </div>
+              {modelProgress ? (
+                <p className="mt-1.5 text-[10px] leading-tight dark:text-white/30 text-black/30 truncate">
+                  {modelProgress}
+                </p>
+              ) : null}
+            </motion.div>
+          )}
+        </AnimatePresence>
+
         <motion.div
           className={cn(
             "relative backdrop-blur-2xl dark:bg-white/2 bg-black/2 rounded-2xl border shadow-2xl transition-colors",
@@ -867,11 +1073,11 @@ export default function Chat() {
                       <XIcon className="w-3 h-3" />
                     </button>
                     {isImage ? (
-                      <div className="w-[72px] h-[72px] rounded-xl overflow-hidden shadow-sm">
+                      <div className="w-18 h-18 rounded-xl overflow-hidden shadow-sm">
                         <img src={objectUrl} alt="attachment" className="w-full h-full object-cover" />
                       </div>
                     ) : (
-                      <div className="flex items-center gap-2 bg-black/5 dark:bg-white/10 rounded-lg px-3 py-2 h-16 text-xs text-foreground shrink-0 max-w-[150px] border border-zinc-200/50 dark:border-zinc-800 shadow-sm">
+                      <div className="flex items-center gap-2 bg-black/5 dark:bg-white/10 rounded-lg px-3 py-2 h-16 text-xs text-foreground shrink-0 max-w-37.5 border border-zinc-200/50 dark:border-zinc-800 shadow-sm">
                         <FileUp className="w-4 h-4 shrink-0 opacity-70" />
                         <span className="truncate flex-1">{file.name}</span>
                       </div>
@@ -916,13 +1122,14 @@ export default function Chat() {
                 onBlur={() => setInputFocused(false)}
                 placeholder=""
                 containerClassName="w-full relative z-10"
-                className="w-full px-4 py-[12px] resize-none bg-transparent border-none text-foreground text-sm focus:outline-none placeholder:text-muted-foreground min-h-[44px]"
+                className="w-full px-4 py-3 resize-none bg-transparent border-none text-foreground text-sm focus:outline-none placeholder:text-muted-foreground min-h-11 disabled:opacity-40 disabled:cursor-not-allowed"
                 style={{ overflow: "hidden" }}
                 showRing={false}
+                disabled={modelLoading}
               />
 
               {/* Overlapping animated placeholder aligned with px-4 py-[12px] padding */}
-              <div className="absolute top-0 left-0 right-0 h-[44px] flex px-4 py-[12px] pointer-events-none z-0">
+              <div className="absolute top-0 left-0 right-0 h-11 flex px-4 py-3 pointer-events-none z-0">
                 <AnimatePresence mode="wait">
                   {!value && !inputFocused && !isTranscribing && (
                     <motion.p
@@ -945,7 +1152,7 @@ export default function Chat() {
           <div className="p-4 pb-3 pt-2 border-t dark:border-white/5 border-black/5 flex items-center justify-between gap-4">
             <div className="flex items-center gap-3">
               <input type="file" multiple ref={fileInputRef} className="hidden" onChange={handleFileChange} />
-              <button onClick={() => fileInputRef.current?.click()} className="p-2 text-muted-foreground hover:text-foreground rounded-lg transition-colors cursor-pointer hover:bg-black/5 dark:hover:bg-white/5" title="Attach file"><Paperclip className="w-4 h-4" /></button>
+              <button onClick={() => fileInputRef.current?.click()} disabled={modelLoading} className="p-2 text-muted-foreground hover:text-foreground rounded-lg transition-colors cursor-pointer hover:bg-black/5 dark:hover:bg-white/5 disabled:opacity-40 disabled:cursor-not-allowed" title="Attach file"><Paperclip className="w-4 h-4" /></button>
               {isListening ? (
                 <div className="flex items-center gap-1.5">
                   <SoundWave levels={audioLevels} />
@@ -969,15 +1176,15 @@ export default function Chat() {
               ) : (
                 <button
                   onClick={startListening}
-                  disabled={isTranscribing}
-                  className="p-2 rounded-lg transition-all cursor-pointer text-muted-foreground hover:text-foreground hover:bg-black/5 dark:hover:bg-white/5 disabled:opacity-50"
+                  disabled={isTranscribing || modelLoading}
+                  className="p-2 rounded-lg transition-all cursor-pointer text-muted-foreground hover:text-foreground hover:bg-black/5 dark:hover:bg-white/5 disabled:opacity-40 disabled:cursor-not-allowed"
                   title={isTranscribing ? "Transcribing..." : "Voice input"}
                 >
                   <Mic className="w-4 h-4" />
                 </button>
               )}
 
-              <div className="flex items-center p-0.5 dark:bg-black/20 bg-black/5 rounded-lg border dark:border-white/5 border-black/5 h-[34px] ml-1">
+              <div className="flex items-center p-0.5 dark:bg-black/20 bg-black/5 rounded-lg border dark:border-white/5 border-black/5 h-8.5 ml-1">
                 <button onClick={() => setMode('ask')} className={cn("px-3 h-full rounded-md text-xs font-medium transition-all flex items-center gap-1.5 cursor-pointer", mode === 'ask' ? "bg-white dark:bg-[#333] text-black dark:text-white shadow-xs" : "text-muted-foreground hover:text-foreground")}>
                   <Search className="w-3.5 h-3.5" /> Ask
                 </button>
@@ -999,9 +1206,9 @@ export default function Chat() {
                     onClick={handleStopResponse} 
                     whileHover={{ scale: 1.05 }} 
                     whileTap={{ scale: 0.95 }} 
-                    className="w-[88px] h-9 flex items-center justify-center gap-2 rounded-lg text-sm font-medium transition-all cursor-pointer bg-red-500/10 text-red-500 hover:bg-red-500/20 dark:bg-red-500/15 dark:hover:bg-red-500/25"
+                    className="w-22 h-9 flex items-center justify-center gap-2 rounded-lg text-sm font-medium transition-all cursor-pointer bg-red-500/10 text-red-500 hover:bg-red-500/20 dark:bg-red-500/15 dark:hover:bg-red-500/25"
                   >
-                    <div className="w-2.5 h-2.5 rounded-[2px] bg-current" />
+                    <div className="w-2.5 h-2.5 rounded-xs bg-current" />
                     <span>Stop</span>
                   </motion.button>
                 ) : (
@@ -1013,10 +1220,10 @@ export default function Chat() {
                     onClick={handleSendMessage} 
                     whileHover={{ scale: 1.02 }} 
                     whileTap={{ scale: 0.98 }} 
-                    disabled={!value.trim()} 
+                    disabled={!value.trim() || modelLoading} 
                     className={cn(
-                      "min-w-[88px] h-9 px-4 rounded-lg text-sm font-medium transition-all flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50", 
-                      value.trim() 
+                      "min-w-22 h-9 px-4 rounded-lg text-sm font-medium transition-all flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50", 
+                      value.trim() && !modelLoading
                         ? (isTyping ? "bg-violet-500 text-white shadow-lg hover:bg-violet-600 shadow-violet-500/25" : "dark:bg-white bg-black dark:text-[#0A0A0B] text-white shadow-lg") 
                         : "dark:bg-white/5 bg-black/5 text-muted-foreground"
                     )}

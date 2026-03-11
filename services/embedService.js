@@ -1,54 +1,71 @@
-const OLLAMA_BASE_URL = process.env.OLLAMA_URL || 'http://localhost:11434';
-const EMBED_MODEL = process.env.EMBED_MODEL || 'nomic-embed-text';
-const BATCH_SIZE = 32; // max texts per Ollama request
-const MAX_EMBED_WORDS = 2000; // safe limit for nomic-embed-text context window
+/**
+ * Embed Service - local inference via @xenova/transformers
+ *
+ * Replaces the Ollama /api/embed endpoint.
+ * The model is downloaded once and cached to disk (no external service needed).
+ * Works identically in Node.js worker threads and in the browser renderer.
+ */
 
+import { pipeline } from '@xenova/transformers';
 import fs from 'fs';
 
-/** Truncate text to MAX_EMBED_WORDS to avoid exceeding model context length. */
+// Xenova/nomic-embed-text-v1 produces 768-dim vectors, same as Ollama nomic-embed-text.
+const MODEL = process.env.EMBED_MODEL || 'Xenova/nomic-embed-text-v1';
+const MAX_EMBED_WORDS = 2000;
+const BATCH_SIZE = parseInt(process.env.SCARK_EMBED_BATCH, 10) || 16;
+
+/** Truncate text to stay within the model context window. */
 function truncateForEmbed(text) {
     const words = text.split(/\s+/);
     if (words.length <= MAX_EMBED_WORDS) return text;
     return words.slice(0, MAX_EMBED_WORDS).join(' ');
 }
 
-/**
- * Generate an embedding for a single text via Ollama.
- */
-export async function embedText(text) {
-    const res = await fetch(`${OLLAMA_BASE_URL}/api/embed`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model: EMBED_MODEL, input: truncateForEmbed(text) }),
+// Singleton pipeline instance, lazy-loaded once per process/worker.
+let _embedder = null;
+let _loadPromise = null;
+
+async function getEmbedder() {
+    if (_embedder) return _embedder;
+    if (_loadPromise) return _loadPromise;
+    _loadPromise = pipeline('feature-extraction', MODEL).then(e => {
+        _embedder = e;
+        _loadPromise = null;
+        console.log(`[EmbedService] Model "${MODEL}" ready.`);
+        return e;
     });
-    if (!res.ok) {
-        const body = await res.text();
-        throw new Error(`Ollama embed failed (${res.status}): ${body}`);
-    }
-    const data = await res.json();
-    return data.embeddings[0];
+    return _loadPromise;
 }
 
 /**
- * Generate embeddings for an array of texts, batching requests.
+ * Generate an embedding for a single text.
+ *
+ * @param {string} text
+ * @returns {Promise<number[]>}
+ */
+export async function embedText(text) {
+    const embedder = await getEmbedder();
+    const out = await embedder(truncateForEmbed(text), { pooling: 'mean', normalize: true });
+    return Array.from(out.data);
+}
+
+/**
+ * Generate embeddings for an array of texts (serial batching to keep memory stable).
+ *
+ * @param {string[]} texts
+ * @returns {Promise<number[][]>}
  */
 async function embedBatch(texts) {
-    const embeddings = [];
+    const embedder = await getEmbedder();
+    const results = [];
     for (let i = 0; i < texts.length; i += BATCH_SIZE) {
         const batch = texts.slice(i, i + BATCH_SIZE).map(truncateForEmbed);
-        const res = await fetch(`${OLLAMA_BASE_URL}/api/embed`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ model: EMBED_MODEL, input: batch }),
-        });
-        if (!res.ok) {
-            const body = await res.text();
-            throw new Error(`Ollama embed failed (${res.status}): ${body}`);
+        for (const text of batch) {
+            const out = await embedder(text, { pooling: 'mean', normalize: true });
+            results.push(Array.from(out.data));
         }
-        const data = await res.json();
-        embeddings.push(...data.embeddings);
     }
-    return embeddings;
+    return results;
 }
 
 /**
@@ -66,33 +83,23 @@ function cosineSimilarity(a, b) {
 
 /**
  * Embed all chunks from crawl results in-place.
- * Adds an `embedding` field to each chunk object in the results array.
+ * Adds an `embedding` field to each chunk object.
  *
- * Output format per result:
- * {
- *   "title": "...",
- *   "url": "...",
- *   "chunks": [
- *     { "chunk_index": 0, "text": "...", "embedding": [0.021, ...], "word_count": 480 }
- *   ]
- * }
+ * @param {Array} results - array of { title, url, chunks: [{ text, ... }] }
+ * @returns {Promise<Array>}
  */
 export async function embedChunks(results) {
     let total = 0;
-
     for (const result of results) {
         const texts = result.chunks.map(c => c.text);
         if (texts.length === 0) continue;
-
         console.log(`Embedding ${texts.length} chunk(s) from: ${result.title}`);
         const vectors = await embedBatch(texts);
-
         for (let i = 0; i < result.chunks.length; i++) {
             result.chunks[i].embedding = vectors[i];
         }
         total += texts.length;
     }
-
     console.log(`Embedded ${total} chunks total.`);
     return results;
 }
@@ -105,7 +112,6 @@ const DEFAULT_FILE = 'results.json';
 export function loadEmbeddings(file = DEFAULT_FILE) {
     if (!fs.existsSync(file)) return [];
     const results = JSON.parse(fs.readFileSync(file, 'utf-8'));
-    // Flatten chunks for search
     return results.flatMap(r =>
         r.chunks
             .filter(c => c.embedding)
@@ -118,19 +124,13 @@ export function loadEmbeddings(file = DEFAULT_FILE) {
 }
 
 /**
- * Semantic search: embed a query and return the top-k most similar chunks.
+ * Semantic search: embed a query and return top-k most similar chunks.
  */
 export async function search(query, topK = 5, file = DEFAULT_FILE) {
     const records = loadEmbeddings(file);
     if (records.length === 0) return [];
-
     const queryVec = await embedText(query);
-
-    const scored = records.map(r => ({
-        ...r,
-        score: cosineSimilarity(queryVec, r.embedding),
-    }));
-
+    const scored = records.map(r => ({ ...r, score: cosineSimilarity(queryVec, r.embedding) }));
     scored.sort((a, b) => b.score - a.score);
     return scored.slice(0, topK).map(({ embedding, ...rest }) => rest);
 }

@@ -46,19 +46,17 @@ export const cleaner = {
 // ── Chunker ───────────────────────────────────────────────
 export const chunker = {
     /** Target words per chunk */
-    chunkSize:    parseInt(process.env.SCARK_CHUNK_SIZE, 10) || 500,
+    chunkSize:    parseInt(process.env.SCARK_CHUNK_SIZE, 10) || 200,
     /** Overlapping words between consecutive chunks */
-    chunkOverlap: parseInt(process.env.SCARK_CHUNK_OVERLAP, 10) || 50,
+    chunkOverlap: parseInt(process.env.SCARK_CHUNK_OVERLAP, 10) || 20,
 };
 
 // ── Embedder ──────────────────────────────────────────────
 export const embedder = {
-    /** Ollama base URL */
-    ollamaUrl:  process.env.OLLAMA_URL    || 'http://localhost:11434',
-    /** Embedding model name */
-    model:      process.env.EMBED_MODEL   || 'nomic-embed-text',
-    /** Max texts sent to Ollama in one request */
-    batchSize:  parseInt(process.env.SCARK_EMBED_BATCH, 10) || 32,
+    /** HuggingFace model ID used by @xenova/transformers (local, no Ollama needed) */
+    model:     process.env.EMBED_MODEL   || 'Xenova/nomic-embed-text-v1',
+    /** Max texts per embedding batch */
+    batchSize: parseInt(process.env.SCARK_EMBED_BATCH, 10) || 16,
 };
 
 // ── Storage ───────────────────────────────────────────────

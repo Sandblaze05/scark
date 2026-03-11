@@ -10,11 +10,17 @@ import { app, BrowserWindow, ipcMain, session } from 'electron';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { WorkerPool } from '../workers/pool.js';
-import { buildSystemPrompt, streamChat, rewriteQuery } from '../services/chatService.js';
+import { buildSystemPrompt, rewriteQuery, requiresFreshData, requiresSearch } from '../services/chatService.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const isDev = !app.isPackaged;
 const DEV_URL = 'http://localhost:3000';
+
+// ── GPU selection ─────────────────────────────────────────
+// Request the high-performance discrete GPU on multi-GPU laptops.
+// These switches must be set before the GPU process is spawned (i.e. before app ready).
+// WebLLM uses WebGPU via Dawn/D3D12 — no ANGLE override needed or safe here.
+app.commandLine.appendSwitch('force_high_performance_gpu');
 
 let mainWindow;
 let ingestionPool;
@@ -40,6 +46,17 @@ function createWindow() {
     session.defaultSession.setPermissionRequestHandler((_webContents, permission, callback) => {
         const allowed = ['media', 'microphone', 'speechRecognition'];
         callback(allowed.includes(permission));
+    });
+
+    // Set COOP/COEP headers required for SharedArrayBuffer (used by WebLLM/WASM)
+    session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
+        callback({
+            responseHeaders: {
+                ...details.responseHeaders,
+                'Cross-Origin-Opener-Policy': ['same-origin'],
+                'Cross-Origin-Embedder-Policy': ['require-corp'],
+            },
+        });
     });
 
     if (isDev) {
@@ -77,7 +94,6 @@ function initWorkerPools() {
 
 // ── IPC handlers ──────────────────────────────────────────
 
-let currentChatAbortController = null;
 
 function registerIPC() {
     // Run full ingestion pipeline
@@ -95,24 +111,10 @@ function registerIPC() {
         return queryPool.exec({ type: 'queryChroma', data: { query, topK } });
     });
 
-    ipcMain.handle('query:chat:stop', () => {
-        if (currentChatAbortController) {
-            currentChatAbortController.abort('User stopped response');
-            currentChatAbortController = null;
-        }
-    });
-
-    // Chat: RAG → stream LLM response
+    // Chat: retrieve RAG context only - LLM streaming is handled by WebLLM in the renderer
     // mode: 'ask' (lightweight) or 'research' (full pipeline when needed)
-    ipcMain.handle('query:chat', async (event, { messages, topK, mode }) => {
-        if (currentChatAbortController) {
-            currentChatAbortController.abort('Starting new response');
-        }
-        const abortController = new AbortController();
-        currentChatAbortController = abortController;
-
+    ipcMain.handle('query:context', async (event, { messages, topK, mode }) => {
         const RELEVANCE_THRESHOLD = 0.45;
-        const MIN_CHUNKS = 2;
 
         try {
             const lastUserMsg = [...messages].reverse().find(m => m.role === 'user');
@@ -120,143 +122,89 @@ function registerIPC() {
 
             const k = topK || 5;
 
-            // 0. Rewrite query: resolve pronouns/context from conversation history
-            event.sender.send('chat:status', 'Understanding your question…');
-            const searchQuery = await rewriteQuery(messages);
-            console.log(`[Chat] Search query: "${searchQuery}"`);
+            // 0. Rewrite query (heuristic only — LLM no longer in main process)
+            const searchQuery = rewriteQuery(messages);
+            console.log('[Context] Search query:', searchQuery);
 
-            // 1. Try retrieving context from existing RAG store
-            event.sender.send('chat:status', 'Checking existing knowledge…');
+            // 1. Determine if search is needed
+            const needsSearch = requiresSearch(searchQuery);
+            const needsFreshDataExplicit = needsSearch && requiresFreshData(searchQuery);
+
             let contextChunks = [];
-            try {
-                contextChunks = await queryPool.exec({
-                    type: 'retrieveContext',
-                    data: { query: searchQuery, topK: k },
-                }) ?? [];
-                console.log(`[Chat] ChromaDB retrieval returned ${contextChunks.length} chunk(s)`);
-                if (contextChunks.length > 0) {
-                    const best = contextChunks[0].distance;
-                    const worst = contextChunks[contextChunks.length - 1].distance;
-                    console.log(`[Chat] Distance range: ${best?.toFixed(4)} – ${worst?.toFixed(4)} (threshold ${RELEVANCE_THRESHOLD})`);
-                }
-            } catch (retrieveErr) {
-                console.warn('[Chat] ChromaDB retrieval failed:', retrieveErr.message);
-            }
 
-            // 2. Filter to relevant chunks
-            const relevant = contextChunks.filter(
-                c => c.distance != null && c.distance < RELEVANCE_THRESHOLD,
-            );
+            if (!needsSearch) {
+                // Pure conversational — return immediately so the model starts without delay
+                console.log('[Context] Conversational query — skipping search.');
 
-            // 3. In 'research' mode, run full pipeline if context is insufficient
-            if (mode === 'research') {
-                const needsFreshData = relevant.length < MIN_CHUNKS;
+            } else if (mode === 'research') {
+                // ── Research mode: wait for full web pipeline ────────────────
+                // The scraped content IS the answer, so the wait is intentional.
+                const MIN_CHUNKS = 2;
+                let relevant = [];
 
-                if (needsFreshData) {
-                    console.log(
-                        `[Chat] Only ${relevant.length}/${contextChunks.length} chunk(s) below threshold ${RELEVANCE_THRESHOLD} — running pipeline`,
-                    );
-                    event.sender.send('chat:status', 'Searching & scraping the web…');
-                    const pipelineResult = await ingestionPool.exec({
-                        type: 'runPipeline',
-                        data: { opts: { seed: { keyword: searchQuery } } },
-                    });
-                    console.log('[Chat] Pipeline done:', pipelineResult?.stats);
-
-                    // Re-retrieve after fresh ingestion
-                    event.sender.send('chat:status', 'Retrieving context…');
+                if (!needsFreshDataExplicit) {
+                    event.sender.send('chat:status', 'Checking existing knowledge…');
                     try {
-                        const freshChunks = await queryPool.exec({
+                        contextChunks = await queryPool.exec({
                             type: 'retrieveContext',
                             data: { query: searchQuery, topK: k },
                         }) ?? [];
-                        const freshRelevant = freshChunks.filter(
-                            c => c.distance != null && c.distance < RELEVANCE_THRESHOLD,
-                        );
-                        if (freshRelevant.length > relevant.length) {
-                            contextChunks = freshChunks;
-                        }
-                    } catch (err) {
-                        console.warn('[Chat] Post-pipeline retrieval failed:', err.message);
+                        console.log('[Context] ChromaDB returned', contextChunks.length, 'chunk(s)');
+                    } catch (e) {
+                        console.warn('[Context] ChromaDB retrieval failed:', e.message);
                     }
-                } else {
-                    console.log(
-                        `[Chat] ${relevant.length} relevant chunk(s) found in existing store — skipping pipeline`,
-                    );
+                    relevant = contextChunks.filter(c => c.distance != null && c.distance < RELEVANCE_THRESHOLD);
                 }
-            } else {
-                // 'ask' mode — use existing relevant context, or do a quick web search
-                if (relevant.length >= MIN_CHUNKS) {
-                    contextChunks = relevant;
-                    console.log(`[Chat][Ask] Using ${relevant.length} relevant chunk(s) from existing store`);
-                } else {
-                    console.log(`[Chat][Ask] Insufficient local context (${relevant.length}) — running quick web search`);
-                    event.sender.send('chat:status', 'Searching the web…');
+
+                if (relevant.length < MIN_CHUNKS || needsFreshDataExplicit) {
+                    event.sender.send('chat:status', 'Searching & scraping the web for deep research…');
                     try {
                         const webResults = await ingestionPool.exec({
-                            type: 'quickSearch',
-                            data: { keyword: searchQuery, maxPages: 3 },
+                            type: 'researchFetch',
+                            data: { keyword: searchQuery, maxPages: 5 },
                         });
-                        console.log(`[Chat][Ask] Quick search returned ${webResults.length} page(s)`);
-                        contextChunks = webResults.map(p => ({
-                            id: p.url,
-                            title: p.title,
-                            url: p.url,
-                            text: p.text,
-                            distance: null,
-                        }));
-                    } catch (err) {
-                        console.warn('[Chat][Ask] Quick search failed:', err.message);
+                        contextChunks = webResults.map(p => ({ id: p.url, title: p.title, url: p.url, text: p.text, distance: null }));
+                    } catch (e) {
+                        console.warn('[Context] Research fetch failed:', e.message);
                         contextChunks = relevant;
                     }
+                } else {
+                    contextChunks = relevant;
                 }
-            }
 
-            console.log(`[Chat] Using ${contextChunks.length} context chunks for LLM`);
-            if (contextChunks.length > 0) {
-                contextChunks.forEach((c, i) => {
-                    console.log(`  [${i + 1}] ${c.title} (${c.text?.length ?? 0} chars, dist: ${c.distance})`);
-                });
             } else {
-                console.warn('[Chat] WARNING: No context found — model will answer without sources');
+                // ── Ask mode: return as fast as possible ─────────────────────
+                // Only hit ChromaDB (fast, ~100 ms). Never block on a web search
+                // here — the LLM starts the moment we return. Users who need
+                // fresh web-sourced answers should switch to Research mode.
+                if (!needsFreshDataExplicit) {
+                    event.sender.send('chat:status', 'Checking existing knowledge…');
+                    try {
+                        const allChunks = await queryPool.exec({
+                            type: 'retrieveContext',
+                            data: { query: searchQuery, topK: k },
+                        }) ?? [];
+                        contextChunks = allChunks.filter(c => c.distance != null && c.distance < RELEVANCE_THRESHOLD);
+                        console.log('[Context] Ask mode — ChromaDB relevant chunks:', contextChunks.length);
+                    } catch (e) {
+                        console.warn('[Context] ChromaDB retrieval failed:', e.message);
+                    }
+                }
+                // If no local context the model answers from its own weights — that
+                // is still better than making the user wait 3-10 s for a web search.
             }
 
-            // 4. Build messages with context-aware system prompt
+            // 2. Build system prompt with retrieved context
             event.sender.send('chat:status', '');
             const systemPrompt = buildSystemPrompt(contextChunks);
-            const fullMessages = [
-                { role: 'system', content: systemPrompt },
-                ...messages,
-            ];
-
-            // 5. Stream tokens from LLM via Ollama
-            try {
-                for await (const token of streamChat(fullMessages, { signal: abortController.signal })) {
-                    event.sender.send('chat:token', token);
-                }
-            } catch (streamErr) {
-                if (streamErr.name === 'AbortError') {
-                    console.log('[Chat] Stream aborted by user');
-                    event.sender.send('chat:done');
-                    return { success: true, aborted: true };
-                }
-                throw streamErr;
-            }
-
-            event.sender.send('chat:done');
 
             return {
                 success: true,
+                systemPrompt,
                 sources: contextChunks.map(c => ({ title: c.title, url: c.url })),
             };
         } catch (err) {
-            if (err?.name === 'AbortError' || err?.message?.includes('AbortError') || err?.message?.includes('aborted')) {
-                console.log('[Chat] Stream aborted by user (caught at top level)');
-                event.sender.send('chat:done');
-                return { success: true, aborted: true };
-            }
-
-            console.error('[Chat] Error:', err?.message || err);
+            console.error('[Context] Error:', err?.message || err);
             event.sender.send('chat:error', err?.message || String(err));
             return { success: false, error: err?.message || String(err) };
         }
@@ -271,6 +219,48 @@ function registerIPC() {
         }
         // Broadcast reset to all windows
         BrowserWindow.getAllWindows().forEach(win => win.webContents.send('chat:new'));
+    });
+
+    // Quick web search – used when the model decides it needs current info in ask mode
+    ipcMain.handle('query:websearch', async (_event, query, maxPages = 3) => {
+        try {
+            const webResults = await ingestionPool.exec({
+                type: 'quickSearch',
+                data: { keyword: query, maxPages },
+            });
+            return (webResults ?? []).map(p => ({ title: p.title, url: p.url, text: p.text }));
+        } catch (e) {
+            console.warn('[WebSearch] Failed:', e.message);
+            return [];
+        }
+    });
+
+    // Batched web search – multiple queries, ONE browser launch, shared page budget
+    ipcMain.handle('query:batchWebsearch', async (_event, queries, maxTotalPages = 5) => {
+        try {
+            const webResults = await ingestionPool.exec({
+                type: 'batchQuickSearch',
+                data: { queries, maxTotalPages },
+            });
+            return (webResults ?? []).map(p => ({ title: p.title, url: p.url, text: p.text }));
+        } catch (e) {
+            console.warn('[BatchWebSearch] Failed:', e.message);
+            return [];
+        }
+    });
+
+    // Fetch a specific URL – used when the model decides to read a user-provided source
+    ipcMain.handle('query:fetchUrl', async (_event, url) => {
+        try {
+            const result = await ingestionPool.exec({
+                type: 'fetchUrl',
+                data: { url },
+            });
+            return result ?? null;
+        } catch (e) {
+            console.warn('[FetchUrl] Failed:', e.message);
+            return null;
+        }
     });
 
     // Worker pool stats

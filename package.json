@@ -4,7 +4,7 @@
   "description": "",
   "main": "electron/main.js",
   "scripts": {
-    "dev:renderer": "next dev renderer --port 3000 --webpack",
+    "dev:renderer": "next dev renderer --port 3000",
     "dev:electron": "electron .",
     "dev": "concurrently -k \"npm:dev:renderer\" \"npm:dev:electron\"",
     "build:renderer": "next build renderer",
@@ -26,6 +26,7 @@
     "electron-builder": "^26.8.1"
   },
   "dependencies": {
+    "@mlc-ai/web-llm": "^0.2.81",
     "@mozilla/readability": "^0.6.0",
     "@tailwindcss/postcss": "^4.2.1",
     "@xenova/transformers": "^2.17.2",

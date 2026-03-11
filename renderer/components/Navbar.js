@@ -75,7 +75,7 @@ const Navbar = () => {
   );
 
   return (
-    <div className={`flex flex-col h-screen bg-zinc-50 dark:bg-[#171717] border-r border-zinc-200 dark:border-transparent text-gray-800 dark:text-gray-200 transition-all duration-300 shrink-0 ${isCollapsed ? 'w-[70px]' : 'w-[260px]'} pt-2`}>
+    <div className={`flex flex-col whitespace-nowrap h-screen bg-zinc-50 dark:bg-[#171717] border-r border-zinc-200 dark:border-transparent text-gray-800 dark:text-gray-200 transition-all duration-300 shrink-0 ${isCollapsed ? 'w-17.5' : 'w-65'} pt-2`}>
 
       {/* Top Header section */}
       <div className="flex items-center justify-between px-3 h-12 shrink-0">
@@ -151,7 +151,7 @@ const Navbar = () => {
           {!isCollapsed && <h3 className="text-xs font-semibold text-gray-500 mb-2 px-2">Your chats</h3>}
           {isCollapsed && <div className="h-px bg-gray-800 my-4 mx-2"></div>}
 
-          <div className="space-y-[2px]">
+          <div className="space-y-0.5">
             {filteredChats.map((chat) => (
               <div
                 key={chat.id}

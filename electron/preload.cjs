@@ -19,41 +19,37 @@ contextBridge.exposeInMainWorld('scark', {
     query: {
         /** Embed query + search ChromaDB for top-k similar chunks */
         search: (query, topK) => ipcRenderer.invoke('query:search', query, topK),
+
+        /** Quick web search triggered when the model requests current information */
+        websearch: (query, maxPages) => ipcRenderer.invoke('query:websearch', query, maxPages),
+
+        /** Batched web search: multiple queries, one browser, shared page budget */
+        batchWebsearch: (queries, maxTotalPages) => ipcRenderer.invoke('query:batchWebsearch', queries, maxTotalPages),
+
+        /** Fetch and read a specific URL (returns { title, text } or null) */
+        fetchUrl: (url) => ipcRenderer.invoke('query:fetchUrl', url),
     },
 
     chat: {
-        /** Start a RAG chat: retrieve context + stream LLM response */
-        send: (data) => ipcRenderer.invoke('query:chat', data),
+        /**
+         * Retrieve RAG context for the conversation.
+         * Returns { success, systemPrompt, sources }.
+         * LLM streaming is performed locally via WebLLM in the renderer.
+         */
+        getContext: (data) => ipcRenderer.invoke('query:context', data),
 
-        /** Stop the current chat generation */
-        stop: () => ipcRenderer.invoke('query:chat:stop'),
-
-        /** Register a callback for each streamed token */
-        onToken: (cb) => {
-            const handler = (_e, token) => cb(token);
-            ipcRenderer.on('chat:token', handler);
-            return () => ipcRenderer.removeListener('chat:token', handler);
-        },
-
-        /** Register a callback for stream completion */
-        onDone: (cb) => {
-            const handler = () => cb();
-            ipcRenderer.on('chat:done', handler);
-            return () => ipcRenderer.removeListener('chat:done', handler);
-        },
-
-        /** Register a callback for stream errors */
-        onError: (cb) => {
-            const handler = (_e, error) => cb(error);
-            ipcRenderer.on('chat:error', handler);
-            return () => ipcRenderer.removeListener('chat:error', handler);
-        },
-
-        /** Register a callback for status updates (pipeline progress) */
+        /** Register a callback for status updates during context retrieval */
         onStatus: (cb) => {
             const handler = (_e, status) => cb(status);
             ipcRenderer.on('chat:status', handler);
             return () => ipcRenderer.removeListener('chat:status', handler);
+        },
+
+        /** Register a callback for context/pipeline errors */
+        onError: (cb) => {
+            const handler = (_e, error) => cb(error);
+            ipcRenderer.on('chat:error', handler);
+            return () => ipcRenderer.removeListener('chat:error', handler);
         },
 
         /** Dispatch New Chat Reset signal */

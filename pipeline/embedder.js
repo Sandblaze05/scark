@@ -2,14 +2,12 @@
  * Pipeline Stage 5 – Embedder (workers)
  *
  * Takes chunked pages and generates vector embeddings for every chunk via
- * the Ollama embedding service.
+ * local @xenova/transformers inference (no Ollama required).
  *
  * Data contract
- * ─────────────
+ * ───────────
  *   Input :  ChunkedPage[]  (from chunker stage)
  *   Output:  EmbeddedPage[] — same shape, with `embedding` added to each chunk
- *
- * Delegates to services/embedService.js for the actual Ollama calls.
  */
 
 import { embedChunks as _embedChunks } from '../services/embedService.js';

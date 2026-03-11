@@ -2,6 +2,11 @@
 const config = {
     output: 'export',
     images: { unoptimized: true },
+    // Turbopack is the default dev bundler in Next.js 16+.
+    // An empty object here tells Next.js we are aware of this, silencing the
+    // "webpack config but no turbopack config" startup error.
+    // Turbopack handles WASM, node-module stubs, and ESM resolution natively.
+    turbopack: {},
     webpack: (config, { isServer }) => {
         // Fixes npm packages that depend on `fs`, `path`, `url` module
         if (!isServer) {
@@ -21,7 +26,29 @@ const config = {
             }
         });
 
+        // Allow WebAssembly (required by @mlc-ai/web-llm)
+        config.experiments = {
+            ...config.experiments,
+            asyncWebAssembly: true,
+            layers: true,
+        };
+
         return config;
+    },
+
+    // Required security headers for SharedArrayBuffer (used by WebLLM/WASM threads)
+    // In Electron dev mode the Next.js server handles these. For production (static
+    // export) Electron sets them via session.defaultSession.webRequest.
+    async headers() {
+        return [
+            {
+                source: '/(.*)',
+                headers: [
+                    { key: 'Cross-Origin-Opener-Policy', value: 'same-origin' },
+                    { key: 'Cross-Origin-Embedder-Policy', value: 'require-corp' },
+                ],
+            },
+        ];
     },
 };
 
