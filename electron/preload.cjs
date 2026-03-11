@@ -25,6 +25,9 @@ contextBridge.exposeInMainWorld('scark', {
         /** Start a RAG chat: retrieve context + stream LLM response */
         send: (data) => ipcRenderer.invoke('query:chat', data),
 
+        /** Stop the current chat generation */
+        stop: () => ipcRenderer.invoke('query:chat:stop'),
+
         /** Register a callback for each streamed token */
         onToken: (cb) => {
             const handler = (_e, token) => cb(token);
@@ -51,6 +54,16 @@ contextBridge.exposeInMainWorld('scark', {
             const handler = (_e, status) => cb(status);
             ipcRenderer.on('chat:status', handler);
             return () => ipcRenderer.removeListener('chat:status', handler);
+        },
+
+        /** Dispatch New Chat Reset signal */
+        triggerNew: () => ipcRenderer.send('chat:triggerNew'),
+
+        /** Register a callback for New Chat clicks */
+        onNew: (cb) => {
+            const handler = () => cb();
+            ipcRenderer.on('chat:new', handler);
+            return () => ipcRenderer.removeListener('chat:new', handler);
         },
     },
 

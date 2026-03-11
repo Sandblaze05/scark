@@ -6,7 +6,7 @@
  * - Exposes IPC handlers so the renderer can drive pipelines and queries
  */
 
-import { app, BrowserWindow, ipcMain } from 'electron';
+import { app, BrowserWindow, ipcMain, session } from 'electron';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { WorkerPool } from '../workers/pool.js';
@@ -30,11 +30,17 @@ function createWindow() {
             preload: path.join(__dirname, 'preload.cjs'),
             contextIsolation: true,
             nodeIntegration: false,
-            sandbox: true,
+            sandbox: false,
         },
     });
 
     mainWindow.setMenuBarVisibility(false)
+
+    // Grant microphone + speech-recognition permissions automatically
+    session.defaultSession.setPermissionRequestHandler((_webContents, permission, callback) => {
+        const allowed = ['media', 'microphone', 'speechRecognition'];
+        callback(allowed.includes(permission));
+    });
 
     if (isDev) {
         mainWindow.loadURL(DEV_URL);
@@ -71,6 +77,8 @@ function initWorkerPools() {
 
 // ── IPC handlers ──────────────────────────────────────────
 
+let currentChatAbortController = null;
+
 function registerIPC() {
     // Run full ingestion pipeline
     ipcMain.handle('pipeline:run', (_event, opts) => {
@@ -87,9 +95,22 @@ function registerIPC() {
         return queryPool.exec({ type: 'queryChroma', data: { query, topK } });
     });
 
+    ipcMain.handle('query:chat:stop', () => {
+        if (currentChatAbortController) {
+            currentChatAbortController.abort('User stopped response');
+            currentChatAbortController = null;
+        }
+    });
+
     // Chat: RAG → stream LLM response
     // mode: 'ask' (lightweight) or 'research' (full pipeline when needed)
     ipcMain.handle('query:chat', async (event, { messages, topK, mode }) => {
+        if (currentChatAbortController) {
+            currentChatAbortController.abort('Starting new response');
+        }
+        const abortController = new AbortController();
+        currentChatAbortController = abortController;
+
         const RELEVANCE_THRESHOLD = 0.45;
         const MIN_CHUNKS = 2;
 
@@ -209,8 +230,17 @@ function registerIPC() {
             ];
 
             // 5. Stream tokens from LLM via Ollama
-            for await (const token of streamChat(fullMessages)) {
-                event.sender.send('chat:token', token);
+            try {
+                for await (const token of streamChat(fullMessages, { signal: abortController.signal })) {
+                    event.sender.send('chat:token', token);
+                }
+            } catch (streamErr) {
+                if (streamErr.name === 'AbortError') {
+                    console.log('[Chat] Stream aborted by user');
+                    event.sender.send('chat:done');
+                    return { success: true, aborted: true };
+                }
+                throw streamErr;
             }
 
             event.sender.send('chat:done');
@@ -220,10 +250,27 @@ function registerIPC() {
                 sources: contextChunks.map(c => ({ title: c.title, url: c.url })),
             };
         } catch (err) {
-            console.error('[Chat] Error:', err.message);
-            event.sender.send('chat:error', err.message);
-            return { success: false, error: err.message };
+            if (err?.name === 'AbortError' || err?.message?.includes('AbortError') || err?.message?.includes('aborted')) {
+                console.log('[Chat] Stream aborted by user (caught at top level)');
+                event.sender.send('chat:done');
+                return { success: true, aborted: true };
+            }
+
+            console.error('[Chat] Error:', err?.message || err);
+            event.sender.send('chat:error', err?.message || String(err));
+            return { success: false, error: err?.message || String(err) };
         }
+    });
+
+    // Handle 'New Chat' signals from any frontend slice (like Navbar)
+    ipcMain.on('chat:triggerNew', (event) => {
+        // Stop any ongoing stream
+        if (currentChatAbortController) {
+            currentChatAbortController.abort();
+            currentChatAbortController = null;
+        }
+        // Broadcast reset to all windows
+        BrowserWindow.getAllWindows().forEach(win => win.webContents.send('chat:new'));
     });
 
     // Worker pool stats
