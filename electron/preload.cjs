@@ -105,10 +105,31 @@ contextBridge.exposeInMainWorld('scark', {
             ipcRenderer.on('chat:list-updated', handler);
             return () => ipcRenderer.removeListener('chat:list-updated', handler);
         },
+
+        /** Delete messages after keepCount in the DB (used for editing a previous message) */
+        truncate: (chatId, keepCount) => ipcRenderer.invoke('chat:truncate', chatId, keepCount),
+
+        /** Save the JSON string representing the turnVersions Map to SQLite */
+        setTurnVersions: (chatId, versionsJson) => ipcRenderer.invoke('chat:setTurnVersions', chatId, versionsJson),
     },
 
     pool: {
         /** Get worker pool stats (idle/busy/queued counts) */
         stats: () => ipcRenderer.invoke('pool:stats'),
+    },
+
+    utils: {
+        /** 
+         * Copy text to the system clipboard using Electron's native API.
+         * Bypasses renderer/Web API permission issues.
+         */
+        copyToClipboard: (text) => ipcRenderer.send('utils:copy-to-clipboard', text),
+    },
+
+    profile: {
+        /** Get the saved user profile object */
+        get: () => ipcRenderer.invoke('profile:get'),
+        /** Persist profile field updates { fullName, displayName, workFunction, preferences } */
+        set: (updates) => ipcRenderer.invoke('profile:set', updates),
     },
 });

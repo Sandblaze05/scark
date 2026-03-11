@@ -6,7 +6,7 @@
  * - Exposes IPC handlers so the renderer can drive pipelines and queries
  */
 
-import { app, BrowserWindow, ipcMain, session } from 'electron';
+import { app, BrowserWindow, ipcMain, session, clipboard } from 'electron';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { WorkerPool } from '../workers/pool.js';
@@ -21,6 +21,10 @@ import {
     setChatPinned,
     setChatSummary,
     touchChatSession,
+    truncateChatMessages,
+    setChatTurnVersions,
+    getProfile,
+    setProfile,
 } from '../services/sqliteService.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -175,6 +179,14 @@ function registerIPC() {
         const touched = touchChatSession(chatId);
         broadcastChatListUpdated();
         return touched;
+    });
+
+    ipcMain.handle('chat:truncate', async (_event, chatId, keepCount) => {
+        return truncateChatMessages(chatId, keepCount);
+    });
+
+    ipcMain.handle('chat:setTurnVersions', async (_event, chatId, turnVersionsJson) => {
+        return setChatTurnVersions(chatId, turnVersionsJson);
     });
 
     ipcMain.on('chat:select', (_event, chatId) => {
@@ -349,6 +361,15 @@ function registerIPC() {
         ingestion: ingestionPool.stats,
         query: queryPool.stats,
     }));
+
+    // Profile
+    ipcMain.handle('profile:get', () => getProfile());
+    ipcMain.handle('profile:set', (_event, updates) => setProfile(updates));
+
+    // Clipboard utils
+    ipcMain.on('utils:copy-to-clipboard', (_event, text) => {
+        clipboard.writeText(text);
+    });
 }
 
 // ── Lifecycle ─────────────────────────────────────────────

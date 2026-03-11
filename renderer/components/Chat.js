@@ -36,7 +36,11 @@ const CodeBlock = React.memo(function CodeBlock({ language, value }) {
   const [copied, setCopied] = useState(false)
 
   const copyToClipboard = () => {
-    navigator.clipboard.writeText(value)
+    if (window.scark?.utils?.copyToClipboard) {
+      window.scark.utils.copyToClipboard(value)
+    } else {
+      navigator.clipboard.writeText(value)
+    }
     setCopied(true)
     setTimeout(() => setCopied(false), 2000)
   }
@@ -462,6 +466,27 @@ export default function Chat() {
   const [chatSummary, setChatSummary] = useState('')
   const streamBufferRef = useRef('')
 
+  // ── Turn versioning (edit history per user-message turn) ─────────────────
+  // turnVersions: Map<turnIndex, {versions: [{userContent, assistantContent}], currentIdx}>
+  const [turnVersions, setTurnVersions] = useState(new Map())
+  const [editingTurn, setEditingTurn] = useState(null) // { turnIndex, value }
+
+  // Broadcast active chat info to siblings (e.g. ChatArea header) via a window event.
+  // This avoids IPC race conditions between siblings.
+  useEffect(() => {
+    window.dispatchEvent(new CustomEvent('scark:activeChatChanged', {
+      detail: { chatId: activeChatId, messageCount: messages.length, title: activeChatTitle }
+    }))
+  }, [messages.length, activeChatId, activeChatTitle])
+
+  // Keep the shared ref up to date so the title-override event handler
+  // always compares against the CURRENT activeChatId (avoids stale closure).
+  useEffect(() => {
+    if (window.__scarkActiveChatIdRef) {
+      window.__scarkActiveChatIdRef.current = activeChatId
+    }
+  }, [activeChatId])
+
   const commandSuggestions = [
     { icon: <Search className="w-4 h-4" />, label: "Ask", description: "Quick answers with LLM", prefix: "/ask" },
     { icon: <FlaskConical className="w-4 h-4" />, label: "Deep Research", description: "Crawls web for answers", prefix: "/research" },
@@ -574,7 +599,26 @@ export default function Chat() {
       content: m.content,
       reasoningPreview: m.reasoningPreview || '',
     })))
+    // Load edit history when opening a session
+    let loadedVersions = new Map()
+    if (session.turnVersionsJson) {
+      try {
+        const parsed = JSON.parse(session.turnVersionsJson)
+        if (Array.isArray(parsed)) {
+          loadedVersions = new Map(parsed)
+        }
+      } catch (e) {}
+    }
+    setTurnVersions(loadedVersions)
+    setEditingTurn(null)
   }, [resetTransientState])
+
+  // Persist turn versions specifically whenever they mutate
+  useEffect(() => {
+    if (!activeChatId) return
+    const str = JSON.stringify(Array.from(turnVersions.entries()))
+    window.scark?.chat?.setTurnVersions?.(activeChatId, str).catch(() => {})
+  }, [turnVersions, activeChatId])
 
   const ensureActiveChat = useCallback(async () => {
     if (activeChatId) return { id: activeChatId, title: activeChatTitle }
@@ -593,17 +637,22 @@ export default function Chat() {
         {
           role: 'system',
           content:
-            'Generate a concise chat title based on the user query. ' +
-            'Return only the title, 3-7 words, no quotes, no markdown, no trailing punctuation.',
+            'You are a helpful assistant that generates extremely concise, catchy, and relevant titles for a new chat session. ' +
+            'The title must capture the core intent or topic of the user\'s first message. ' +
+            'Rules:\n' +
+            '- Maximum 4 to 5 words.\n' +
+            '- Do not use quotes, punctuation, or filler words like "How to" or "Question about".\n' +
+            '- Capitalize it like a book title (Title Case).\n' +
+            '- Output ONLY the title, nothing else.'
         },
-        { role: 'user', content: firstUserQuery },
-      ], { maxTokens: 20 })
+        { role: 'user', content: `User's first message:\n"${firstUserQuery}"` },
+      ], { maxTokens: 15, temperature: 0.3 })
 
       const title = (raw || '')
         .split('\n')[0]
-        .replace(/^"|"$/g, '')
+        .replace(/["*`]/g, '') // remove any quotes or markdown wrapping
         .trim()
-        .slice(0, 80)
+        .slice(0, 45) // keep it reasonably tight
 
       if (!title) return
       await window.scark?.chat?.rename?.(chatId, title)
@@ -655,17 +704,45 @@ export default function Chat() {
       loadChatSession(chatId)
     })
 
+    // Sync activeChatTitle immediately when ChatArea renames the chat.
+    // Uses a ref internally so the event handler always has the current chatId.
+    const activeChatIdRef = { current: null }
+    const handleTitleOverride = (e) => {
+      if (e.detail?.chatId && e.detail.chatId === activeChatIdRef.current) {
+        setActiveChatTitle(e.detail.title)
+        activeChatIdRef.current = activeChatIdRef.current // keep same id
+      }
+    }
+    // Keep the ref in sync whenever activeChatId changes — done via a nested effect below.
+    // We expose a setter so the sibling effect can update it.
+    window.__scarkActiveChatIdRef = activeChatIdRef
+    window.addEventListener('scark:chatTitleOverride', handleTitleOverride)
+
+    // Ctrl+Shift+O → new chat
+    const handleKeyDown = async (e) => {
+      if (e.ctrlKey && e.shiftKey && (e.key === 'O' || e.key === 'o')) {
+        e.preventDefault()
+        await window.scark?.chat?.create?.({ title: 'New chat', select: true })
+      }
+    }
+    window.addEventListener('keydown', handleKeyDown)
+
     const init = async () => {
-      const chats = await window.scark.chat.list()
-      if ((chats ?? []).length > 0) {
-        const first = chats[0].id
-        await loadChatSession(first)
-        window.scark.chat.select(first)
+      // Create a fresh chat session on startup as requested
+      if (window.scark?.chat?.create) {
+        await window.scark.chat.create({ title: 'New chat', select: true })
       }
     }
     init()
 
-    return () => { removeError(); removeStatus(); if (removeSelected) removeSelected() }
+    return () => {
+      removeError()
+      removeStatus()
+      if (removeSelected) removeSelected()
+      window.removeEventListener('scark:chatTitleOverride', handleTitleOverride)
+      window.removeEventListener('keydown', handleKeyDown)
+      delete window.__scarkActiveChatIdRef
+    }
   }, [loadChatSession, resetTransientState])
 
   useEffect(() => {
@@ -1083,6 +1160,8 @@ export default function Chat() {
     if (finalText) {
       streamBufferRef.current = ''
       setMessages(msgs => [...msgs, { role: 'assistant', content: finalText, reasoningPreview: streamingReasoningPreview }])
+      // Patch the response into turnVersions if this was an edit
+      patchLatestVersionRef.current?.(finalText)
 
       try {
         await window.scark?.chat?.addMessage?.({
@@ -1133,9 +1212,89 @@ export default function Chat() {
       return
     }
 
+    // When sending a fresh message, seed a v1 for this turn (will be finalised after AI responds)
     setValue('')
     await executeSend(query, currentMode, messages)
   }
+
+  // ── Edit a previous user message ────────────────────────────
+  // Groups flat messages array into user+assistant pairs.
+  const getGroupedTurns = useCallback((msgs) => {
+    const turns = []
+    let i = 0
+    while (i < msgs.length) {
+      if (msgs[i].role === 'user') {
+        const userMsg = msgs[i]
+        const assistantMsg = msgs[i + 1]?.role === 'assistant' ? msgs[i + 1] : null
+        turns.push({ userMsg, assistantMsg, startIndex: i })
+        i += assistantMsg ? 2 : 1
+      } else {
+        i++
+      }
+    }
+    return turns
+  }, [])
+
+  const handleEditSubmit = useCallback(async (turnIndex, newText, turns) => {
+    if (!newText.trim() || isTyping) return
+    setEditingTurn(null)
+
+    const turn = turns[turnIndex]
+    // Snapshot the OLD pair into versions before overwriting
+    setTurnVersions(prev => {
+      const next = new Map(prev)
+      const existing = next.get(turnIndex) ?? {
+        versions: [{ userContent: turn.userMsg.content, assistantContent: turn.assistantMsg?.content ?? '' }],
+        currentIdx: 0,
+      }
+      // If this is the first edit, ensure v1 is the original
+      const newVersion = { userContent: newText.trim(), assistantContent: '' } // placeholder
+      return next.set(turnIndex, { versions: [...existing.versions, newVersion], currentIdx: existing.versions.length })
+    })
+
+    // Truncate messages to just before this turn, then re-run
+    const msgsUpToTurn = messages.slice(0, turn.startIndex)
+
+    // Remove the old completion from the DB so it doesn't duplicate on page reload
+    if (activeChatId) {
+      await window.scark?.chat?.truncate?.(activeChatId, turn.startIndex)
+    }
+
+    await executeSend(newText.trim(), mode, msgsUpToTurn)
+  }, [isTyping, messages, mode, executeSend, activeChatId])
+
+  // After executeSend completes a streamed response, patch the latest version's assistantContent
+  const patchLatestVersionRef = useRef(null)
+  patchLatestVersionRef.current = (assistantText) => {
+    setTurnVersions(prev => {
+      if (prev.size === 0) return prev
+      const next = new Map()
+      let updated = false
+      for (const [k, v] of prev) {
+        const lastIdx = v.versions.length - 1
+        if (!updated && v.versions[lastIdx]?.assistantContent === '') {
+          const newVersions = [...v.versions]
+          newVersions[lastIdx] = { ...newVersions[lastIdx], assistantContent: assistantText }
+          next.set(k, { ...v, versions: newVersions })
+          updated = true
+        } else {
+          next.set(k, v)
+        }
+      }
+      return next
+    })
+  }
+
+  const navigateTurnVersion = useCallback((turnIndex, delta) => {
+    setTurnVersions(prev => {
+      const existing = prev.get(turnIndex)
+      if (!existing) return prev
+      const next = new Map(prev)
+      const newIdx = Math.max(0, Math.min(existing.versions.length - 1, existing.currentIdx + delta))
+      next.set(turnIndex, { ...existing, currentIdx: newIdx })
+      return next
+    })
+  }, [])
 
   const handleStopResponse = async () => {
     if (webllmAbortRef.current) {
@@ -1203,87 +1362,198 @@ export default function Chat() {
           </div>
         )}
 
-        {messages.map((msg, i) => (
-          <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-            <div className={`max-w-[80%] px-5 py-3 rounded-2xl whitespace-pre-wrap text-sm leading-snug ${msg.role === 'user'
-              ? 'bg-primary text-primary-foreground dark:bg-white/10 dark:text-white bg-black/5 text-black'
-              : 'dark:text-gray-200 text-gray-800'
-              }`}>
-              {msg.role === 'user' ? (
-                msg.content
-              ) : (
-                <article 
-                  className="prose dark:prose-invert max-w-none prose-p:my-0 prose-pre:bg-transparent prose-pre:p-0 prose-headings:my-1 prose-ul:my-0 prose-li:my-0 pb-1 leading-snug"
-                  style={{ fontFamily: 'ui-serif, Georgia, Cambria, "Times New Roman", Times, serif', fontSize: '16px' }}
-                >
-                  {msg.reasoningPreview ? (
-                    <details className="mb-3 rounded-lg border border-black/10 dark:border-white/10 bg-black/5 dark:bg-white/5 px-3 py-2 font-sans">
-                      <summary className="cursor-pointer text-xs font-medium text-foreground/70 select-none">Reasoning preview</summary>
-                      <pre className="mt-2 whitespace-pre-wrap text-[11px] leading-relaxed text-foreground/65 font-mono">{msg.reasoningPreview}</pre>
-                    </details>
-                  ) : null}
-                  <ReactMarkdown
-                    remarkPlugins={[remarkGfm, remarkBreaks, remarkExternalLinks]}
-                    components={{
-                      a({ href, children }) {
-                        const isRawUrl = typeof children?.[0] === 'string' && children[0] === href;
-                        let displayText = children;
-                        let domain = '';
-                        
-                        try {
-                          const urlObj = new URL(href);
-                          domain = urlObj.hostname.replace(/^www\./, '');
-                        } catch (e) {
-                          domain = href;
-                        }
+        {(() => {
+          const groupedTurns = getGroupedTurns(messages)
+          return groupedTurns.map((turn, turnIndex) => {
+            const isLastTurn = turnIndex === groupedTurns.length - 1
+            const vEntry = turnVersions.get(turnIndex)
+            // What to actually display for this turn
+            const displayUserContent = vEntry
+              ? vEntry.versions[vEntry.currentIdx].userContent
+              : turn.userMsg.content
+            const displayAssistantContent = vEntry
+              ? vEntry.versions[vEntry.currentIdx].assistantContent || turn.assistantMsg?.content || ''
+              : turn.assistantMsg?.content || ''
+            const versionCount = vEntry ? vEntry.versions.length : 1
+            const currentVersionNum = vEntry ? vEntry.currentIdx + 1 : 1
+            const isEditing = editingTurn?.turnIndex === turnIndex
 
-                        if (isRawUrl) {
-                          displayText = domain + (href.length > domain.length + 8 ? '...' : '');
-                        }
-                        
-                        return (
-                          <span className="relative inline-block group mx-1 align-middle">
-                            <a href={href} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-black/5 dark:bg-white/10 hover:bg-black/10 dark:hover:bg-white/20 text-xs font-sans text-gray-700 dark:text-gray-300 no-underline transition-all ring-1 ring-black/5 dark:ring-white/10">
-                              <Globe className="w-3 h-3 opacity-70 shrink-0" />
-                              <span className="truncate max-w-30">{domain}</span>
-                            </a>
-                            
-                            {/* Hover Card */}
-                            <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-64 p-3 bg-white dark:bg-[#1C1C1C] rounded-xl shadow-xl border border-black/5 dark:border-white/10 opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all duration-200 z-50 text-left font-sans flex flex-col gap-1.5 transform scale-95 group-hover:scale-100 origin-bottom pointer-events-none">
-                               <div className="flex items-center gap-2 text-xs font-semibold text-gray-700 dark:text-gray-300">
-                                  <Globe className="w-3.5 h-3.5 opacity-70 shrink-0" />
-                                  <span className="truncate">{domain}</span>
-                               </div>
-                               <div className="text-[13px] font-normal text-gray-600 dark:text-gray-400 line-clamp-3 leading-snug break-all">
-                                  {href}
-                               </div>
-                            </div>
-                          </span>
-                        );
-                      },
-                      code({ node, inline, className, children, ...props }) {
-                        const match = /language-(\w+)/.exec(className || '')
-                        return !inline && match ? (
-                          <CodeBlock
-                            language={match[1]}
-                            value={String(children).replace(/\n$/, '')}
-                            {...props}
-                          />
+            return (
+              <React.Fragment key={turnIndex}>
+                {/* USER MESSAGE */}
+                <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="flex justify-end">
+                  <div className="max-w-[80%] group relative">
+                    {/* Bubble */}
+                    {isEditing ? (
+                      <div className="flex flex-col gap-2 items-end">
+                        <textarea
+                          autoFocus
+                          value={editingTurn.value}
+                          onChange={e => setEditingTurn(prev => ({ ...prev, value: e.target.value }))}
+                          onKeyDown={e => {
+                            if (e.key === 'Enter' && !e.shiftKey) {
+                              e.preventDefault()
+                              handleEditSubmit(turnIndex, editingTurn.value, groupedTurns)
+                            }
+                            if (e.key === 'Escape') setEditingTurn(null)
+                          }}
+                          className="w-80 min-h-[60px] bg-zinc-100 dark:bg-white/10 text-gray-900 dark:text-white text-sm px-4 py-3 rounded-2xl outline-none ring-2 ring-violet-500/40 resize-none"
+                          rows={3}
+                        />
+                        <div className="flex gap-2">
+                          <button onClick={() => setEditingTurn(null)} className="text-xs px-3 py-1.5 rounded-lg bg-zinc-200 dark:bg-white/10 text-gray-600 dark:text-gray-400 hover:bg-zinc-300 dark:hover:bg-white/20 transition-colors">Cancel</button>
+                          <button onClick={() => handleEditSubmit(turnIndex, editingTurn.value, groupedTurns)} className="text-xs px-3 py-1.5 rounded-lg bg-violet-600 text-white hover:bg-violet-700 transition-colors">Send</button>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="px-5 py-3 rounded-2xl whitespace-pre-wrap text-sm leading-snug bg-primary text-primary-foreground dark:bg-white/10 dark:text-white bg-black/5 text-black">
+                        {displayUserContent}
+                      </div>
+                    )}
+
+                    {/* Toolbar: copy, edit, version nav */}
+                    {!isEditing && (
+                      <div className="flex items-center justify-end gap-1.5 mt-1.5 opacity-0 group-hover:opacity-100 transition-opacity duration-150">
+                        {/* Version nav: only if > 1 version */}
+                        {versionCount > 1 && (
+                          <div className="flex items-center gap-1 text-xs text-gray-400 dark:text-gray-500">
+                            <button
+                              onClick={() => navigateTurnVersion(turnIndex, -1)}
+                              disabled={currentVersionNum === 1}
+                              className="p-1 rounded hover:bg-zinc-200 dark:hover:bg-white/10 disabled:opacity-30 transition-colors"
+                            >
+                              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-3 h-3"><path d="M15 18l-6-6 6-6"/></svg>
+                            </button>
+                            <span className="font-mono tabular-nums px-1">{currentVersionNum}/{versionCount}</span>
+                            <button
+                              onClick={() => navigateTurnVersion(turnIndex, 1)}
+                              disabled={currentVersionNum === versionCount}
+                              className="p-1 rounded hover:bg-zinc-200 dark:hover:bg-white/10 disabled:opacity-30 transition-colors"
+                            >
+                              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-3 h-3"><path d="M9 18l6-6-6-6"/></svg>
+                            </button>
+                          </div>
+                        )}
+                        {/* Copy */}
+                        <button
+                          title="Copy message"
+                          onClick={() => window.scark?.utils?.copyToClipboard?.(displayUserContent)}
+                          className="p-1.5 rounded-lg text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 hover:bg-zinc-200 dark:hover:bg-white/10 transition-colors"
+                        >
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-3.5 h-3.5"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                        </button>
+                        {/* Edit — only on last turn */}
+                        {isLastTurn && !isTyping && (
+                          <button
+                            title="Edit message"
+                            onClick={() => setEditingTurn({ turnIndex, value: turn.userMsg.content })}
+                            className="p-1.5 rounded-lg text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 hover:bg-zinc-200 dark:hover:bg-white/10 transition-colors"
+                          >
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-3.5 h-3.5"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+                          </button>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                </motion.div>
+
+                {/* ASSISTANT MESSAGE for this turn */}
+                {(turn.assistantMsg || (isLastTurn && isTyping)) && (
+                  <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="flex justify-start">
+                    <div className="max-w-[80%] group relative dark:text-gray-200 text-gray-800">
+                      {/* Show versioned assistant content when navigating, otherwise show real msg */}
+                      {vEntry && vEntry.currentIdx < vEntry.versions.length - 1 ? (
+                        // Navigated to older version — render with full markdown formatting
+                        displayAssistantContent ? (
+                          <article
+                            className="prose dark:prose-invert max-w-none prose-p:my-0 prose-pre:bg-transparent prose-pre:p-0 prose-headings:my-1 prose-ul:my-0 prose-li:my-0 pb-1 leading-snug prose-code:before:content-none prose-code:after:content-none"
+                            style={{ fontFamily: 'ui-serif, Georgia, Cambria, "Times New Roman", Times, serif', fontSize: '16px' }}
+                          >
+                            <ReactMarkdown
+                              remarkPlugins={[remarkGfm, remarkBreaks, remarkExternalLinks]}
+                              components={{
+                                code({ node, inline, className, children, ...props }) {
+                                  const match = /language-(\w+)/.exec(className || '')
+                                  return !inline && match ? (
+                                    <CodeBlock language={match[1]} value={String(children).replace(/\n$/, '')} {...props} />
+                                  ) : (
+                                    <code className={cn("bg-black/10 dark:bg-white/10 px-1 rounded", className)} {...props}>{children}</code>
+                                  )
+                                }
+                              }}
+                            >
+                              {displayAssistantContent}
+                            </ReactMarkdown>
+                          </article>
                         ) : (
-                          <code className={cn("bg-black/10 dark:bg-white/10 px-1 rounded", className)} {...props}>
-                            {children}
-                          </code>
+                          <span className="text-gray-400 italic text-xs">Response not yet available for this version</span>
                         )
-                      }
-                    }}
-                  >
-                    {msg.content}
-                  </ReactMarkdown>
-                </article>
-              )}
-            </div>
-          </motion.div>
-        ))}
+                      ) : turn.assistantMsg ? (
+                        <article
+                          className="prose dark:prose-invert max-w-none prose-p:my-0 prose-pre:bg-transparent prose-pre:p-0 prose-headings:my-1 prose-ul:my-0 prose-li:my-0 pb-1 leading-snug prose-code:before:content-none prose-code:after:content-none"
+                          style={{ fontFamily: 'ui-serif, Georgia, Cambria, "Times New Roman", Times, serif', fontSize: '16px' }}
+                        >
+                          {turn.assistantMsg.reasoningPreview ? (
+                            <details className="mb-3 rounded-lg border border-black/10 dark:border-white/10 bg-black/5 dark:bg-white/5 px-3 py-2 font-sans">
+                              <summary className="cursor-pointer text-xs font-medium text-foreground/70 select-none">Reasoning preview</summary>
+                              <pre className="mt-2 whitespace-pre-wrap text-[11px] leading-relaxed text-foreground/65 font-mono">{turn.assistantMsg.reasoningPreview}</pre>
+                            </details>
+                          ) : null}
+                          <ReactMarkdown
+                            remarkPlugins={[remarkGfm, remarkBreaks, remarkExternalLinks]}
+                            components={{
+                              a({ href, children }) {
+                                const isRawUrl = typeof children?.[0] === 'string' && children[0] === href;
+                                let displayText = children;
+                                let domain = '';
+                                try { const urlObj = new URL(href); domain = urlObj.hostname.replace(/^www\./, ''); } catch (e) { domain = href; }
+                                if (isRawUrl) { displayText = domain + (href.length > domain.length + 8 ? '...' : ''); }
+                                return (
+                                  <span className="relative inline-block group mx-1 align-middle">
+                                    <a href={href} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-black/5 dark:bg-white/10 hover:bg-black/10 dark:hover:bg-white/20 text-xs font-sans text-gray-700 dark:text-gray-300 no-underline transition-all ring-1 ring-black/5 dark:ring-white/10">
+                                      <Globe className="w-3 h-3 opacity-70 shrink-0" />
+                                      <span className="truncate max-w-30">{domain}</span>
+                                    </a>
+                                    <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-64 p-3 bg-white dark:bg-[#1C1C1C] rounded-xl shadow-xl border border-black/5 dark:border-white/10 opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all duration-200 z-50 text-left font-sans flex flex-col gap-1.5 transform scale-95 group-hover:scale-100 origin-bottom pointer-events-none">
+                                       <div className="flex items-center gap-2 text-xs font-semibold text-gray-700 dark:text-gray-300"><Globe className="w-3.5 h-3.5 opacity-70 shrink-0" /><span className="truncate">{domain}</span></div>
+                                       <div className="text-[13px] font-normal text-gray-600 dark:text-gray-400 line-clamp-3 leading-snug break-all">{href}</div>
+                                    </div>
+                                  </span>
+                                );
+                              },
+                              code({ node, inline, className, children, ...props }) {
+                                const match = /language-(\w+)/.exec(className || '')
+                                return !inline && match ? (
+                                  <CodeBlock language={match[1]} value={String(children).replace(/\n$/, '')} {...props} />
+                                ) : (
+                                  <code className={cn("bg-black/10 dark:bg-white/10 px-1 rounded", className)} {...props}>{children}</code>
+                                )
+                              }
+                            }}
+                          >
+                            {turn.assistantMsg.content}
+                          </ReactMarkdown>
+                        </article>
+                      ) : null}
+                      {/* Copy button for assistant messages */}
+                      {turn.assistantMsg && (
+                        <div className="flex items-center gap-1.5 mt-1 opacity-0 group-hover:opacity-100 transition-opacity duration-150">
+                          <button
+                            title="Copy response"
+                            onClick={() => window.scark?.utils?.copyToClipboard?.(turn.assistantMsg.content)}
+                            className="p-1.5 rounded-lg text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 hover:bg-zinc-100 dark:hover:bg-white/10 transition-colors"
+                          >
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-3.5 h-3.5"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  </motion.div>
+                )}
+              </React.Fragment>
+            )
+          })
+        })()}
 
         {/* LLM Thinking/Streaming State in the Main Chat Area (Like Claude/GPT) */}
         {isTyping && (

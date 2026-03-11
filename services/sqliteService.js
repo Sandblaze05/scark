@@ -59,7 +59,8 @@ function getDb() {
             is_pinned       INTEGER NOT NULL DEFAULT 0,
             created_at      TEXT    NOT NULL,
             updated_at      TEXT    NOT NULL,
-            last_active_at  TEXT    NOT NULL
+            last_active_at  TEXT    NOT NULL,
+            turn_versions_json TEXT DEFAULT '{}'
         );
 
         CREATE TABLE IF NOT EXISTS chat_messages (
@@ -74,7 +75,15 @@ function getDb() {
         CREATE INDEX IF NOT EXISTS idx_chat_sessions_last_active ON chat_sessions(last_active_at DESC);
         CREATE INDEX IF NOT EXISTS idx_chat_sessions_pinned ON chat_sessions(is_pinned DESC, last_active_at DESC);
         CREATE INDEX IF NOT EXISTS idx_chat_messages_chat_id ON chat_messages(chat_id, id);
+
+        CREATE TABLE IF NOT EXISTS user_profile (
+            key   TEXT PRIMARY KEY,
+            value TEXT
+        );
     `);
+
+    // Migration for existing databases
+    try { _db.exec("ALTER TABLE chat_sessions ADD COLUMN turn_versions_json TEXT DEFAULT '{}'"); } catch (e) {}
 
     console.log(`[SQLite] Database ready at ${DB_PATH}`);
     return _db;
@@ -236,7 +245,12 @@ export function listChatSessions() {
                 WHERE m.chat_id = s.id
                 ORDER BY m.id DESC
                 LIMIT 1
-            ) AS lastMessage
+            ) AS lastMessage,
+            (
+                SELECT COUNT(*)
+                FROM chat_messages m
+                WHERE m.chat_id = s.id
+            ) AS messageCount
         FROM chat_sessions s
         ORDER BY s.is_pinned DESC, s.last_active_at DESC
     `).all();
@@ -248,12 +262,12 @@ export function createChatSession({ title = 'New chat', isPinned = false } = {})
     const ts = nowIso();
 
     db.prepare(`
-        INSERT INTO chat_sessions (id, title, summary, is_pinned, created_at, updated_at, last_active_at)
-        VALUES (?, ?, '', ?, ?, ?, ?)
+        INSERT INTO chat_sessions (id, title, summary, is_pinned, created_at, updated_at, last_active_at, turn_versions_json)
+        VALUES (?, ?, '', ?, ?, ?, ?, '{}')
     `).run(id, title, isPinned ? 1 : 0, ts, ts, ts);
 
     return db.prepare(`
-        SELECT id, title, summary, is_pinned AS isPinned, created_at AS createdAt, updated_at AS updatedAt, last_active_at AS lastActiveAt
+        SELECT id, title, summary, is_pinned AS isPinned, created_at AS createdAt, updated_at AS updatedAt, last_active_at AS lastActiveAt, turn_versions_json AS turnVersionsJson
         FROM chat_sessions WHERE id = ?
     `).get(id);
 }
@@ -261,7 +275,7 @@ export function createChatSession({ title = 'New chat', isPinned = false } = {})
 export function getChatSession(chatId) {
     const db = getDb();
     const chat = db.prepare(`
-        SELECT id, title, summary, is_pinned AS isPinned, created_at AS createdAt, updated_at AS updatedAt, last_active_at AS lastActiveAt
+        SELECT id, title, summary, is_pinned AS isPinned, created_at AS createdAt, updated_at AS updatedAt, last_active_at AS lastActiveAt, turn_versions_json AS turnVersionsJson
         FROM chat_sessions WHERE id = ?
     `).get(chatId);
     if (!chat) return null;
@@ -274,6 +288,14 @@ export function getChatSession(chatId) {
     `).all(chatId);
 
     return { ...chat, messages };
+}
+
+export function setChatTurnVersions(chatId, turnVersionsJson) {
+    ensureChatExists(chatId);
+    const ts = nowIso();
+    getDb().prepare('UPDATE chat_sessions SET turn_versions_json = ?, updated_at = ?, last_active_at = ? WHERE id = ?')
+        .run(turnVersionsJson, ts, ts, chatId);
+    return getChatSession(chatId);
 }
 
 export function renameChatSession(chatId, title) {
@@ -330,9 +352,48 @@ export function addChatMessage({ chatId, role, content, reasoningPreview = '' })
     return getChatSession(chatId);
 }
 
+/**
+ * Delete all messages in a chat after the first `keepCount` rows (ordered by id).
+ * Used when a user edits an earlier prompt so the old continuation is wiped.
+ */
+export function truncateChatMessages(chatId, keepCount) {
+    ensureChatExists(chatId);
+    const db = getDb();
+    // Find the id of the Nth row (keepCount-th message, 1-indexed)
+    const rows = db.prepare(
+        'SELECT id FROM chat_messages WHERE chat_id = ? ORDER BY id ASC'
+    ).all(chatId);
+    if (rows.length <= keepCount) return { success: true } // nothing to delete
+    const cutoffId = rows[keepCount].id // first id to delete
+    db.prepare('DELETE FROM chat_messages WHERE chat_id = ? AND id >= ?').run(chatId, cutoffId);
+    const ts = nowIso()
+    db.prepare('UPDATE chat_sessions SET updated_at = ?, last_active_at = ? WHERE id = ?').run(ts, ts, chatId)
+    return { success: true };
+}
+
 export function touchChatSession(chatId) {
     ensureChatExists(chatId);
     const ts = nowIso();
     getDb().prepare('UPDATE chat_sessions SET last_active_at = ? WHERE id = ?').run(ts, chatId);
     return { success: true };
+}
+
+// ── User Profile ──────────────────────────────────────────
+
+export function getProfile() {
+    const db = getDb();
+    const rows = db.prepare('SELECT key, value FROM user_profile').all();
+    return Object.fromEntries(rows.map(r => [r.key, r.value]));
+}
+
+export function setProfile(updates) {
+    const db = getDb();
+    const upsert = db.prepare('INSERT INTO user_profile (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value');
+    const tx = db.transaction(() => {
+        for (const [key, value] of Object.entries(updates)) {
+            upsert.run(key, value ?? '');
+        }
+    });
+    tx();
+    return getProfile();
 }

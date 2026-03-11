@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { useTheme } from 'next-themes';
+import Settings from './Settings';
 import {
   Search,
   MoreHorizontal,
@@ -8,8 +9,6 @@ import {
   PanelLeftOpen,
   Pin,
   PinOff,
-  Share,
-  UserPlus,
   Pencil,
   Trash2,
   Sun,
@@ -23,9 +22,14 @@ const Navbar = () => {
   const [activeMenuId, setActiveMenuId] = useState(null);
   const [activeChatId, setActiveChatId] = useState(null);
   const [chats, setChats] = useState([]);
+  const [renamingChatId, setRenamingChatId] = useState(null);
+  const [renamingValue, setRenamingValue] = useState('');
+  const [showSettings, setShowSettings] = useState(false);
+  const [userProfile, setUserProfile] = useState({ fullName: 'Sarang Rastogi', initials: 'SR' });
   const { theme, setTheme } = useTheme();
   const [mounted, setMounted] = useState(false);
   const menuRef = useRef(null);
+  const renameInputRef = useRef(null);
 
   const normalizeChats = (list) => (list ?? []).map(chat => ({
     ...chat,
@@ -49,7 +53,15 @@ const Navbar = () => {
       }
     };
 
+    const loadProfile = async () => {
+      const data = await window.scark?.profile?.get?.();
+      if (disposed || !data?.fullName) return;
+      const initials = data.fullName.split(' ').filter(Boolean).map(w => w[0]).join('').toUpperCase().slice(0, 2);
+      setUserProfile({ fullName: data.fullName, initials });
+    };
+
     loadChats();
+    loadProfile();
 
     const removeSelected = window.scark?.chat?.onSelected?.((chatId) => {
       setActiveChatId(chatId);
@@ -86,10 +98,9 @@ const Navbar = () => {
     setActiveMenuId(null);
   };
 
-  const handleSelectChat = async (chatId) => {
+  const handleSelectChat = (chatId) => {
     setActiveChatId(chatId);
-    await window.scark?.chat?.touch?.(chatId);
-    window.scark?.chat?.select?.(chatId);
+    window.scark?.chat?.select?.(chatId); // just select — no touch so order doesn't change
   };
 
   const togglePin = async (chat) => {
@@ -103,28 +114,47 @@ const Navbar = () => {
   };
 
   const renameChat = async (chat) => {
-    const newName = prompt('Enter new chat name:', chat.title);
-    if (newName && newName.trim() !== '') {
-      await window.scark?.chat?.rename?.(chat.id, newName.trim());
-    }
+    setRenamingChatId(chat.id);
+    setRenamingValue(chat.title || '');
     setActiveMenuId(null);
+    setTimeout(() => renameInputRef.current?.focus(), 0);
+  };
+
+  const handleSaveRename = async (chatId) => {
+    if (renamingValue.trim()) {
+      await window.scark?.chat?.rename?.(chatId, renamingValue.trim());
+    }
+    setRenamingChatId(null);
   };
 
   const filteredChats = useMemo(() => {
     const query = searchQuery.trim().toLowerCase();
-    if (!query) return chats;
-    return chats.filter(chat => (chat.title || '').toLowerCase().includes(query));
+    // Hide empty chats. Use lastMessage as fallback if messageCount is not yet in data.
+    let chatsWithMessages = chats.filter(chat =>
+      (chat.messageCount !== undefined ? chat.messageCount > 0 : !!chat.lastMessage)
+    );
+    // Always keep pinned chats at top, then sort by updatedAt descending
+    chatsWithMessages = [...chatsWithMessages].sort((a, b) => {
+      if (a.isPinned && !b.isPinned) return -1;
+      if (!a.isPinned && b.isPinned) return 1;
+      return (b.updatedAt || b.lastActiveAt || '') > (a.updatedAt || a.lastActiveAt || '') ? 1 : -1;
+    });
+    if (!query) return chatsWithMessages;
+    return chatsWithMessages.filter(chat => (chat.title || '').toLowerCase().includes(query));
   }, [chats, searchQuery]);
 
   return (
+    <>
     <div className={`flex flex-col whitespace-nowrap h-screen bg-zinc-50 dark:bg-[#171717] border-r border-zinc-200 dark:border-transparent text-gray-800 dark:text-gray-200 transition-all duration-300 shrink-0 ${isCollapsed ? 'w-17.5' : 'w-65'} pt-2`}>
       <div className="flex items-center justify-between px-3 h-12 shrink-0">
-        <div className={`flex items-center overflow-hidden transition-all duration-300 ${isCollapsed ? 'w-0 opacity-0' : 'w-auto opacity-100'}`}>
-          <div className="w-8 h-8 rounded-full flex items-center justify-center hover:bg-zinc-200 dark:hover:bg-[#202123] cursor-pointer">
-            <svg viewBox="0 0 24 24" fill="currentColor" className="w-6 h-6 text-black dark:text-white pb-0.5" xmlns="http://www.w3.org/2000/svg">
+        <div className={`flex items-center gap-2 overflow-hidden transition-all duration-300 ${isCollapsed ? 'w-0 opacity-0' : 'w-auto opacity-100'}`}>
+          {/* Logo + SCARK text – larger size */}
+          <div className="w-8 h-8 flex items-center justify-center shrink-0">
+            <svg viewBox="0 0 24 24" fill="currentColor" className="w-6 h-6 text-black dark:text-white" xmlns="http://www.w3.org/2000/svg">
               <path d="M22.2819 9.8211a5.9847 5.9847 0 0 0-.5157-4.9108 6.0462 6.0462 0 0 0-6.5098-2.9A6.0651 6.0651 0 0 0 4.9807 4.1818a5.9847 5.9847 0 0 0-3.9977 2.9 6.0462 6.0462 0 0 0 .7427 7.0966 5.98 5.98 0 0 0 .511 4.9107 6.051 6.051 0 0 0 6.5146 2.9001A5.9847 5.9847 0 0 0 13.2599 24a6.0557 6.0557 0 0 0 5.7718-4.2057 5.9847 5.9847 0 0 0 3.989-2.9 6.051 6.051 0 0 0-.7388-7.0732z" />
             </svg>
           </div>
+          <span className="text-sm font-bold tracking-widest text-gray-600 dark:text-gray-300">SCARK</span>
         </div>
 
         <button
@@ -192,11 +222,28 @@ const Navbar = () => {
                 className={`flex items-center gap-2 w-full p-2 hover:bg-zinc-200 dark:hover:bg-[#202123] rounded-lg transition-colors text-sm text-gray-700 dark:text-gray-300 group cursor-pointer relative ${isCollapsed ? 'justify-center' : ''} ${activeMenuId === chat.id || activeChatId === chat.id ? 'bg-zinc-200 dark:bg-[#202123]' : ''}`}
                 title={chat.title}
               >
-                {isCollapsed ? (
+                  {isCollapsed ? (
                   <MessageSquare size={20} className="shrink-0 text-gray-500 dark:text-gray-400 group-hover:text-gray-800 dark:group-hover:text-gray-200" />
                 ) : (
                   <>
-                    <span className="truncate flex-1 text-left relative z-10 group-hover:pr-8">{chat.title}</span>
+                    {renamingChatId === chat.id ? (
+                      <input
+                        ref={renameInputRef}
+                        type="text"
+                        value={renamingValue}
+                        onChange={(e) => setRenamingValue(e.target.value)}
+                        onBlur={() => handleSaveRename(chat.id)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') handleSaveRename(chat.id)
+                          if (e.key === 'Escape') setRenamingChatId(null)
+                          e.stopPropagation()
+                        }}
+                        onClick={(e) => e.stopPropagation()}
+                        className="flex-1 bg-zinc-100 dark:bg-[#2f2f2f] text-gray-800 dark:text-gray-200 text-sm px-2 py-0.5 rounded outline-none ring-1 ring-violet-400/50 mr-2"
+                      />
+                    ) : (
+                      <span className="truncate flex-1 text-left relative z-10 group-hover:pr-8">{chat.title}</span>
+                    )}
                     <div className={`${activeMenuId === chat.id ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'} absolute right-0 flex items-center gap-2 bg-linear-to-l from-zinc-200 dark:from-[#202123] via-zinc-200 dark:via-[#202123] to-transparent pl-8 pr-2 py-1 transition-opacity duration-200 z-20 rounded-r-lg`}>
                       {Boolean(chat.isPinned) ? <Pin size={14} className="text-gray-500 dark:text-gray-400 shrink-0" /> : null}
                       <div className="relative" ref={activeMenuId === chat.id ? menuRef : null}>
@@ -209,22 +256,16 @@ const Navbar = () => {
                           }}
                         />
                         {activeMenuId === chat.id && (
-                          <div className="absolute top-6 right-0 w-52 bg-white dark:bg-[#2f2f2f] border border-zinc-200 dark:border-gray-700 rounded-lg shadow-xl py-1 z-50 text-gray-700 dark:text-gray-300 cursor-default" onClick={e => e.stopPropagation()}>
-                            <button className="w-full text-left px-3 py-2 text-sm hover:bg-zinc-100 dark:hover:bg-[#424242] flex items-center gap-3 transition-colors" onClick={() => setActiveMenuId(null)}>
-                              <Share size={16} /> Share
+                          <div className="absolute top-6 right-0 w-48 bg-white dark:bg-[#2f2f2f] border border-zinc-200 dark:border-gray-700 rounded-xl shadow-xl py-1.5 z-50 text-gray-700 dark:text-gray-300 cursor-default" onClick={e => e.stopPropagation()}>
+                            <button className="w-full text-left px-3 py-2 text-sm hover:bg-zinc-100 dark:hover:bg-[#3a3a3a] flex items-center gap-3 transition-colors rounded-lg mx-auto" onClick={() => renameChat(chat)}>
+                              <Pencil size={14} className="opacity-70" /> Rename
                             </button>
-                            <button className="w-full text-left px-3 py-2 text-sm hover:bg-zinc-100 dark:hover:bg-[#424242] flex items-center gap-3 transition-colors" onClick={() => setActiveMenuId(null)}>
-                              <UserPlus size={16} /> Start a group chat
-                            </button>
-                            <button className="w-full text-left px-3 py-2 text-sm hover:bg-zinc-100 dark:hover:bg-[#424242] flex items-center gap-3 transition-colors" onClick={() => renameChat(chat)}>
-                              <Pencil size={16} /> Rename
-                            </button>
-                            <button className="w-full text-left px-3 py-2 text-sm hover:bg-zinc-100 dark:hover:bg-[#424242] flex items-center gap-3 transition-colors" onClick={() => togglePin(chat)}>
-                              {Boolean(chat.isPinned) ? <><PinOff size={16} /> Unpin chat</> : <><Pin size={16} /> Pin chat</>}
+                            <button className="w-full text-left px-3 py-2 text-sm hover:bg-zinc-100 dark:hover:bg-[#3a3a3a] flex items-center gap-3 transition-colors" onClick={() => togglePin(chat)}>
+                              {Boolean(chat.isPinned) ? <><PinOff size={14} className="opacity-70" /> Unpin</> : <><Pin size={14} className="opacity-70" /> Pin</>}
                             </button>
                             <div className="h-px bg-zinc-200 dark:bg-gray-700 my-1 mx-2" />
-                            <button className="w-full text-left px-3 py-2 text-sm hover:bg-red-50 dark:hover:bg-[#424242] text-red-500 dark:text-red-400 flex items-center gap-3 transition-colors" onClick={() => deleteChat(chat)}>
-                              <Trash2 size={16} /> Delete
+                            <button className="w-full text-left px-3 py-2 text-sm hover:bg-red-50 dark:hover:bg-[#3a3a3a] text-red-500 dark:text-red-400 flex items-center gap-3 transition-colors" onClick={() => deleteChat(chat)}>
+                              <Trash2 size={14} /> Delete
                             </button>
                           </div>
                         )}
@@ -280,12 +321,27 @@ const Navbar = () => {
           )
         )}
 
-        <button className={`flex items-center gap-3 w-full p-2 hover:bg-zinc-200 dark:hover:bg-[#202123] rounded-lg transition-colors text-sm text-gray-800 dark:text-gray-200 ${isCollapsed ? 'justify-center' : ''}`}>
-          <div className="w-8 h-8 rounded-full bg-[#fca5a5] flex items-center justify-center text-xs font-bold shrink-0 text-gray-900">SR</div>
-          {!isCollapsed && <span className="font-semibold truncate flex-1 text-left">Sarang Rastogi</span>}
+        <button
+          className={`flex items-center gap-3 w-full p-2 hover:bg-zinc-200 dark:hover:bg-[#202123] rounded-lg transition-colors text-sm text-gray-800 dark:text-gray-200 ${isCollapsed ? 'justify-center' : ''}`}
+          onClick={() => setShowSettings(true)}
+          title="Profile & Settings"
+        >
+          <div className="w-8 h-8 rounded-full bg-[#fca5a5] flex items-center justify-center text-xs font-bold shrink-0 text-gray-900">{userProfile.initials}</div>
+          {!isCollapsed && <span className="font-semibold truncate flex-1 text-left">{userProfile.fullName}</span>}
         </button>
       </div>
     </div>
+
+    {showSettings && <Settings
+      onClose={() => setShowSettings(false)}
+      onProfileSaved={(p) => {
+        const initials = p.fullName
+          ? p.fullName.split(' ').filter(Boolean).map(w => w[0]).join('').toUpperCase().slice(0, 2)
+          : 'SR'
+        setUserProfile({ fullName: p.fullName || 'Sarang Rastogi', initials })
+      }}
+    />}
+  </>
   );
 };
 
