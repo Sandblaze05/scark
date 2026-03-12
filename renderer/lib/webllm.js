@@ -160,42 +160,31 @@ export async function planSearchQueries(userQuery) {
 }
 
 /**
- * Ask-mode evidence depth estimator.
- *
- * Returns how many pages should be crawled per web_search action.
- * 1 page  -> single-source factual lookup (weather, stock quote, quick fact)
- * 2 pages -> normal ask queries
- * 3 pages -> higher-stakes or potentially conflicting facts
+ * Extract strict formatting metrics and the core goal from the user's query.
  *
  * @param {string} userQuery
- * @returns {Promise<number>} integer in [1, 3]
+ * @returns {Promise<string>} The goal/format requirement.
  */
-export async function decideAskPageCap(userQuery) {
-    if (!_s.engine) return 2;
+export async function formulateGoal(userQuery) {
+    if (!_s.engine) return 'Standard answer';
 
-    const messages = [
+    const goal = await complete([
         {
             role: 'system',
             content:
-                'You decide web evidence depth for ASK mode.\n' +
-                'Output exactly one integer: 1, 2, or 3.\n\n' +
-                'Use 1 for single-source quick facts (weather, exchange rate, price-like lookups).\n' +
-                'Use 2 for most normal questions.\n' +
-                'Use 3 for high-stakes, nuanced, or likely-conflicting information.\n' +
-                'Do not output any words, punctuation, or explanation.',
+                'You are an intent-analysis agent. Read the user question and determine if they have STRICT FORMATTING or STRUCTURAL requirements (e.g., "write an abstract", "format as an IEEE paper", "give me exactly 5 bullet points", "write a python script").\n\n' +
+                'If they do, output a concise 1-2 sentence instruction describing exactly what the final output MUST look like.\n' +
+                'If it is just a normal question without strict structural demands, output exactly: "Standard answer".\n\n' +
+                'Do NOT answer the question. Only output the formatting goal.\n' +
+                'Example 1:\nUser: "write an abstract on semantic segmentation using IEEE papers"\nOutput: "The final answer MUST be formatted as a formal academic abstract synthesizing semantic segmentation using IEEE paper citations."\n\n' +
+                'Example 2:\nUser: "what is the capital of france"\nOutput: "Standard answer"'
         },
-        { role: 'user', content: userQuery },
-    ];
+        { role: 'user', content: userQuery }
+    ], { maxTokens: 80 });
 
-    try {
-        const text = await complete(messages, { maxTokens: 4 });
-        const match = text.match(/[123]/);
-        const value = match ? Number(match[0]) : 2;
-        return Math.min(3, Math.max(1, value));
-    } catch (_) {
-        return 2;
-    }
+    return goal || 'Standard answer';
 }
+
 
 /**
  * Ask the model to decide which tools to use for the user's query.
@@ -211,15 +200,16 @@ export async function decideAskPageCap(userQuery) {
  *
  * @param {string} userQuery
  * @param {'ask'|'research'} [mode]
- * @returns {Promise<{ actions: Array<{ tool: string, args: Record<string, string> }> }>}
+ * @returns {Promise<{ actions: Array<{ tool: string, args: Record<string, string> }>, pageCap: number }>}
  */
 export async function planActions(userQuery, mode = 'ask', conversationHistory = []) {
-    if (!_s.engine) return { actions: [] };
+    if (!_s.engine) return { actions: [], pageCap: 2 };
 
     const modeRules = mode === 'research'
         ? [
             'Mode: deep research.',
-            '- Prefer broader evidence collection.',
+            '- You MUST ALWAYS output at least one web_search action unless the question is completely trivial.',
+            '- Prefer broader evidence collection for deep analysis.',
             '- You may propose up to 6 actions total.',
             '- Include multiple web_search lines when evidence breadth helps.',
             '- Include read_url when the user references specific URLs/sources.',
@@ -257,28 +247,39 @@ export async function planActions(userQuery, mode = 'ask', conversationHistory =
                 modeRules + '\n\n' +
                 'Rules:\n' +
                 '- Output one tool call per line.\n' +
-                '- For web_search: write 2-4 short, keyword-focused queries (one web_search per query). Do NOT copy the user sentence verbatim. Resolve any pronouns or references using conversation history.\n' +
+                '- For web_search: write 2-4 short, keyword-focused queries (one web_search per query). Do NOT copy the user sentence verbatim. Resolve any pronouns or references using conversation history. Do NOT use boolean operators (AND, OR, NOT), quotes, wildcards, or advanced search syntax. Plain keywords only.\n' +
                 '- For read_url: extract the exact URL from the user message.\n' +
                 '- For knowledge_search: write a concise search phrase.\n' +
                 '- You may combine tools (e.g. knowledge_search + web_search).\n' +
+                '- IMPORTANT: If the user asks you to "write", "summarize", "analyze", or "explain" a topic, you MUST use web_search to find evidence first. Never output "none" for these tasks.\n' +
+                '- Always output exactly one line starting with "page_cap: N", where N is 1, 2, or 3 based on evidence depth needed.\n' +
+                '  - Use page_cap: 1 for single-source quick facts (weather, exchange rate, price-like lookups).\n' +
+                '  - Use page_cap: 2 for most normal questions.\n' +
+                '  - Use page_cap: 3 for high-stakes, nuanced, or likely-conflicting information.\n' +
                 '- If no tools are needed, reply with exactly: none\n\n' +
-                'Output format (one per line):\n' +
+                'Output format:\n' +
+                'page_cap: N\n' +
                 'tool_name: argument\n\n' +
                 'Examples:\n\n' +
                 'User: "What is the latest news on SpaceX?"\n' +
+                'page_cap: 2\n' +
                 'web_search: SpaceX latest news 2025\n' +
                 'web_search: SpaceX Starship launch update\n\n' +
                 'User: "Summarize this article https://example.com/post"\n' +
+                'page_cap: 1\n' +
                 'read_url: https://example.com/post\n\n' +
                 'User: "What did I read about quantum computing last week?"\n' +
+                'page_cap: 2\n' +
                 'knowledge_search: quantum computing\n\n' +
                 'User: "From the React docs, explain useEffect"\n' +
+                'page_cap: 2\n' +
                 'read_url: https://react.dev/reference/react/useEffect\n' +
                 'web_search: React useEffect hook explained\n\n' +
                 'User: "What is 2 + 2?"\n' +
                 'none\n\n' +
                 'Conversation: user asked about Go TUI libraries, assistant answered with tview and bubbletea.\n' +
                 'User: "any other alternatives?"\n' +
+                'page_cap: 2\n' +
                 'web_search: Go TUI library alternatives\n' +
                 'knowledge_search: Go terminal UI frameworks' +
                 historyBlock,
@@ -290,23 +291,30 @@ export async function planActions(userQuery, mode = 'ask', conversationHistory =
         const text = await complete(planMessages, { maxTokens: 120 });
         return parseActionPlan(text);
     } catch (_) {
-        return { actions: [] };
+        return { actions: [], pageCap: 2 };
     }
 }
 
 /**
  * Parse the model's action plan output into structured actions.
  * @param {string} text
- * @returns {{ actions: Array<{ tool: string, args: Record<string, string> }> }}
+ * @returns {{ actions: Array<{ tool: string, args: Record<string, string> }>, pageCap: number }}
  */
 function parseActionPlan(text) {
     const trimmed = text.trim();
-    if (/^none$/i.test(trimmed)) return { actions: [] };
+    if (/^none$/i.test(trimmed)) return { actions: [], pageCap: 2 };
 
     const actions = [];
+    let pageCap = 2;
     for (const line of trimmed.split('\n')) {
         const clean = line.trim();
         if (!clean || /^none$/i.test(clean)) continue;
+
+        const capMatch = clean.match(/^page_cap:\s*([123])/i);
+        if (capMatch) {
+            pageCap = parseInt(capMatch[1], 10);
+            continue;
+        }
 
         // Match "tool_name: argument"
         const match = clean.match(/^(web_search|read_url|knowledge_search):\s*(.+)$/i);
@@ -327,5 +335,5 @@ function parseActionPlan(text) {
     }
 
     // Cap total actions to prevent runaway
-    return { actions: actions.slice(0, 6) };
+    return { actions: actions.slice(0, 6), pageCap };
 }

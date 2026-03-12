@@ -32,8 +32,7 @@ const isDev = !app.isPackaged;
 const DEV_URL = 'http://localhost:3000';
 
 // ── GPU selection ─────────────────────────────────────────
-// Force high-performance GPU by default (requested for laptops that otherwise
-// overuse iGPU). Allow an opt-out env var for troubleshooting.
+// Force high-performance GPU by default
 if (process.env.SCARK_DISABLE_HIGH_PERF_GPU !== '1') {
     app.commandLine.appendSwitch('force_high_performance_gpu');
 }
@@ -337,11 +336,23 @@ function registerIPC() {
 
     // Quick web search – used when the model decides it needs current info in ask mode
     ipcMain.handle('query:websearch', async (_event, query, maxPages = 3) => {
+        console.log(`[WebSearch] Request: "${query}" (maxPages: ${maxPages})`);
+        const pool = getIngestionPool();
+
+        // If the worker pool is already busy (all workers occupied), return
+        // immediately instead of queueing behind a long-running search that
+        // will just cause the frontend to time out again.
+        if (pool.stats.idle === 0) {
+            console.warn(`[WebSearch] Pool busy (${pool.stats.busy} active, ${pool.stats.queued} queued) — skipping to avoid timeout.`);
+            return [];
+        }
+
         try {
-            const webResults = await getIngestionPool().exec({
+            const webResults = await pool.exec({
                 type: 'quickSearch',
                 data: { keyword: query, maxPages },
             });
+            console.log(`[WebSearch] Completed: ${(webResults ?? []).length} result(s)`);
             return (webResults ?? []).map(p => ({ title: p.title, url: p.url, text: p.text }));
         } catch (e) {
             console.warn('[WebSearch] Failed:', e.message);
@@ -351,11 +362,20 @@ function registerIPC() {
 
     // Batched web search – multiple queries, ONE browser launch, shared page budget
     ipcMain.handle('query:batchWebsearch', async (_event, queries, maxTotalPages = 5) => {
+        console.log(`[BatchWebSearch] Request: ${queries.length} queries (maxTotalPages: ${maxTotalPages})`);
+        const pool = getIngestionPool();
+
+        if (pool.stats.idle === 0) {
+            console.warn(`[BatchWebSearch] Pool busy — skipping to avoid timeout.`);
+            return [];
+        }
+
         try {
-            const webResults = await getIngestionPool().exec({
+            const webResults = await pool.exec({
                 type: 'batchQuickSearch',
                 data: { queries, maxTotalPages },
             });
+            console.log(`[BatchWebSearch] Completed: ${(webResults ?? []).length} result(s)`);
             return (webResults ?? []).map(p => ({ title: p.title, url: p.url, text: p.text }));
         } catch (e) {
             console.warn('[BatchWebSearch] Failed:', e.message);

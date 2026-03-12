@@ -73,7 +73,8 @@ export function buildSystemPrompt(contextChunks) {
     let contextText = '';
     let usedChars = 0;
     for (let i = 0; i < contextChunks.length; i++) {
-        const entry = `[${i + 1}] ${contextChunks[i].text}\n\n`;
+        const ts = contextChunks[i].timestamp ? ` (Date: ${contextChunks[i].timestamp})` : '';
+        const entry = `[${i + 1}]${ts} ${contextChunks[i].text}\n\n`;
         if (usedChars + entry.length > CONTEXT_CHAR_BUDGET && i > 0) break;
         contextText += entry;
         usedChars += entry.length;
@@ -84,7 +85,8 @@ export function buildSystemPrompt(contextChunks) {
         'IMPORTANT: You must establish an ability to reason internally. Double-check your facts for accuracy based on the reference material before presenting your single, unified final response. Break down your logic step-by-step.',
         'Write a clear, concise final answer in your own words. Do NOT copy-paste the source text.',
         'Mention source numbers like [1] when you use information from them.',
-        "If the sources don't cover the question, say so briefly.",
+        'NEVER fabricate, invent, or hallucinate citations, DOIs, paper titles, author names, journal names, or URLs. Only reference sources provided above.',
+        "If the sources don't cover the question, say so briefly and suggest the user search for more information.",
         '',
         'Reference material:',
         contextText,

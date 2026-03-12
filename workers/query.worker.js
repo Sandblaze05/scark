@@ -45,10 +45,11 @@ const handlers = {
 
             contextChunks.push({
                 id,
-                title:    page?.title ?? '',
-                url:      page?.url ?? id.split('::')[0],
-                text:     chunk?.text ?? chromaResults.documents[0][i] ?? '',
-                distance: chromaResults.distances?.[0]?.[i] ?? null,
+                title:     page?.title ?? '',
+                url:       page?.url ?? id.split('::')[0],
+                text:      chunk?.text ?? chromaResults.documents[0][i] ?? '',
+                timestamp: chunk?.timestamp ?? null,
+                distance:  chromaResults.distances?.[0]?.[i] ?? null,
             });
         }
 

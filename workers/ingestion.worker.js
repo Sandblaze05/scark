@@ -129,7 +129,7 @@ const handlers = {
             return cleaned.map(p => ({
                 title: p.title,
                 url: p.url,
-                text: p.cleanedText.slice(0, 5000), // Larger chunk for deep research directly
+                text: p.cleanedText, // Full extracted text
             }));
         } finally {
             await browser.close();
@@ -173,7 +173,7 @@ const handlers = {
             return cleaned.map(p => ({
                 title: p.title,
                 url: p.url,
-                text: p.cleanedText.slice(0, 3000),
+                text: p.cleanedText,
             }));
         } finally {
             await browser.close();
@@ -228,7 +228,7 @@ const handlers = {
             return cleaned.map(p => ({
                 title: p.title,
                 url: p.url,
-                text: p.cleanedText.slice(0, 3000),
+                text: p.cleanedText,
             }));
         } finally {
             await browser.close();
@@ -270,7 +270,7 @@ const handlers = {
             return {
                 title: cleaned[0].title,
                 url: cleaned[0].url,
-                text: cleaned[0].cleanedText.slice(0, 5000),
+                text: cleaned[0].cleanedText,
             };
         } finally {
             await browser.close();
