@@ -18,3 +18,5 @@ node_modules/
 /blob-report/
 /playwright/.cache/
 /playwright/.auth/
+scark.db-shm
+scark.db-wal

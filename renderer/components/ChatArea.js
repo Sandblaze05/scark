@@ -1,18 +1,26 @@
 'use client'
 import React, { useState, useEffect, useRef } from 'react'
 import Chat from './Chat'
-import { ChevronDown, Pin, PinOff, Pencil, Trash2 } from 'lucide-react'
+import { ChevronDown, Pin, PinOff, Pencil, Trash2, Ghost } from 'lucide-react'
 
 const ChatArea = () => {
   const [chatInfo, setChatInfo] = useState({ chatId: null, messageCount: 0, title: 'New chat', isPinned: false })
   const [isEditingTitle, setIsEditingTitle] = useState(false)
   const [editingTitleValue, setEditingTitleValue] = useState('')
   const [showDropdown, setShowDropdown] = useState(false)
+  const [isTemporary, setIsTemporary] = useState(false)
   const titleInputRef = useRef(null)
   const dropdownRef = useRef(null)
 
   useEffect(() => {
-    const handleChatChanged = (e) => setChatInfo(prev => ({ ...prev, ...e.detail }))
+    const handleChatChanged = (e) => {
+      setChatInfo(prev => ({ ...prev, ...e.detail }))
+      if (e.detail.isTemporary !== undefined) {
+        setIsTemporary(e.detail.isTemporary)
+      } else {
+        setIsTemporary(false)
+      }
+    }
     window.addEventListener('scark:activeChatChanged', handleChatChanged)
 
     const handleClickOutside = (e) => {
@@ -72,10 +80,15 @@ const ChatArea = () => {
   }
 
   return (
-    <div className="flex flex-1 flex-col pt-2 h-full gap-0 overflow-x-hidden w-full">
-      {/* Header: pill appears only after first message is sent, left-aligned */}
-      <header className='flex items-center w-full px-5 py-2 min-h-[52px]'>
-        {hasMessages && (
+    <div className="flex flex-1 flex-col pt-2 h-full gap-0 overflow-x-hidden w-full relative">
+      <header className='flex items-center justify-between w-full px-5 py-2 min-h-[52px]'>
+        <div className="flex-1">
+          {isTemporary ? (
+            <div className="flex items-center gap-2 text-sm font-medium px-4 py-2 rounded-full shadow-sm max-w-xs bg-white dark:bg-[#2f2f2f] text-gray-800 dark:text-white border border-zinc-300 dark:border-white/10 italic">
+              <Ghost size={14} className="shrink-0 text-violet-500" />
+              <span>Temporary Chat</span>
+            </div>
+          ) : hasMessages && (
           <div className="relative" ref={dropdownRef}>
             {isEditingTitle ? (
               <input
@@ -138,10 +151,27 @@ const ChatArea = () => {
               </div>
             )}
           </div>
+          )}
+        </div>
+
+        {!hasMessages && (
+          <div className="flex items-center gap-2 ml-4">
+            <button
+              onClick={() => setIsTemporary(!isTemporary)}
+              className={`p-2 rounded-xl transition-all ${
+                isTemporary 
+                  ? 'bg-violet-100 text-violet-600 dark:bg-violet-500/20 dark:text-violet-400 ring-2 ring-violet-500/40 shadow-sm' 
+                  : 'text-gray-500 hover:bg-zinc-200 dark:hover:bg-white/10 dark:text-gray-400 hover:text-black dark:hover:text-white'
+              }`}
+              title="Temporary Chat (No history saved)"
+            >
+              <Ghost size={18} />
+            </button>
+          </div>
         )}
       </header>
 
-      <Chat />
+      <Chat isTemporary={isTemporary} setIsTemporary={setIsTemporary} />
     </div>
   )
 }

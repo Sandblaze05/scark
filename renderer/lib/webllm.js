@@ -82,7 +82,7 @@ function estimateTokens(text) {
  */
 function trimMessages(messages) {
     const system = messages.filter(m => m.role === 'system');
-    const turns  = messages.filter(m => m.role !== 'system');
+    const turns = messages.filter(m => m.role !== 'system');
 
     let budget = PROMPT_TOKEN_BUDGET -
         system.reduce((s, m) => s + estimateTokens(m.content), 0);

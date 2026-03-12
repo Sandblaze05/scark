@@ -46,11 +46,6 @@ const Navbar = () => {
       if (disposed) return;
       const normalized = normalizeChats(list);
       setChats(normalized);
-      if (normalized.length > 0) {
-        const target = normalized[0].id;
-        setActiveChatId(target);
-        window.scark?.chat?.select?.(target);
-      }
     };
 
     const loadProfile = async () => {
@@ -152,6 +147,8 @@ const Navbar = () => {
           <div className="w-8 h-8 flex items-center justify-center shrink-0">
             <svg viewBox="0 0 24 24" fill="currentColor" className="w-6 h-6 text-black dark:text-white" xmlns="http://www.w3.org/2000/svg">
               <path d="M22.2819 9.8211a5.9847 5.9847 0 0 0-.5157-4.9108 6.0462 6.0462 0 0 0-6.5098-2.9A6.0651 6.0651 0 0 0 4.9807 4.1818a5.9847 5.9847 0 0 0-3.9977 2.9 6.0462 6.0462 0 0 0 .7427 7.0966 5.98 5.98 0 0 0 .511 4.9107 6.051 6.051 0 0 0 6.5146 2.9001A5.9847 5.9847 0 0 0 13.2599 24a6.0557 6.0557 0 0 0 5.7718-4.2057 5.9847 5.9847 0 0 0 3.989-2.9 6.051 6.051 0 0 0-.7388-7.0732z" />
+              <circle cx="9.5" cy="10" r="1.5" fill="white" className="dark:fill-black" />
+              <circle cx="14.5" cy="10" r="1.5" fill="white" className="dark:fill-black" />
             </svg>
           </div>
           <span className="text-sm font-bold tracking-widest text-gray-600 dark:text-gray-300">SCARK</span>

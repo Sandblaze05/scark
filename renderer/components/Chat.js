@@ -178,7 +178,126 @@ function SoundWave({ levels }) {
   )
 }
 
-export default function Chat() {
+const AnimatedLogo = React.memo(({ mousePosition }) => {
+  const containerRef = useRef(null)
+  const [rect, setRect] = useState(null)
+  const [isBlinking, setIsBlinking] = useState(false)
+
+  useEffect(() => {
+    let blinkTimeout;
+    const scheduleBlink = () => {
+      const delay = Math.random() * 4000 + 2000;
+      blinkTimeout = setTimeout(() => {
+        setIsBlinking(true);
+        setTimeout(() => {
+          setIsBlinking(false);
+          scheduleBlink();
+        }, 120);
+      }, delay);
+    };
+    scheduleBlink();
+    return () => clearTimeout(blinkTimeout);
+  }, []);
+
+  useEffect(() => {
+    let animationFrameId;
+    const update = () => {
+      if (containerRef.current) {
+        setRect(containerRef.current.getBoundingClientRect())
+      }
+    }
+    
+    // Initial measure after a small delay to ensure DOM is settled
+    const timeoutId = setTimeout(update, 50)
+    
+    const onResize = () => {
+      cancelAnimationFrame(animationFrameId)
+      animationFrameId = requestAnimationFrame(update)
+    }
+
+    window.addEventListener('resize', onResize)
+    window.addEventListener('scroll', onResize, { passive: true })
+    
+    return () => {
+      clearTimeout(timeoutId)
+      cancelAnimationFrame(animationFrameId)
+      window.removeEventListener('resize', onResize)
+      window.removeEventListener('scroll', onResize)
+    }
+  }, [])
+
+  const centerX = rect ? rect.left + rect.width / 2 : 0
+  const centerY = rect ? rect.top + rect.height / 2 : 0
+
+  return (
+    <div className="flex justify-center mb-6 h-12">
+      <div ref={containerRef} className="relative w-12 h-12 flex items-center justify-center">
+        <svg viewBox="0 0 24 24" className="w-10 h-10 overflow-visible text-black dark:text-white" xmlns="http://www.w3.org/2000/svg">
+          {(() => {
+            const dx = mousePosition.x - centerX
+            const dy = mousePosition.y - centerY
+            const dist = rect ? Math.sqrt(dx * dx + dy * dy) : 999
+            
+            const maxDist = 200
+            const rawInfluence = Math.max(0, 1 - dist / maxDist)
+            const influence = Math.pow(rawInfluence, 1.4)
+            
+            // Eye tracking math
+            // Calculate direction of the mouse relative to the center
+            const angle = Math.atan2(dy, dx)
+            // Cap how far the eyes can move from the center of their sockets
+            const maxEyeOffset = 1.2
+            // Move eyes further when cursor is close, up to max offset
+            const eyeDist = Math.min(dist / 40, maxEyeOffset) 
+            const eyeOffsetX = Math.cos(angle) * eyeDist
+            const eyeOffsetY = Math.sin(angle) * eyeDist
+
+            return (
+              <motion.g
+                animate={{ 
+                  scale: 1 + influence * 0.15
+                }}
+                transition={{ type: "spring", stiffness: 350, damping: 20 }}
+                style={{ transformOrigin: "12px 12px" }}
+              >
+                <path
+                  d="M22.2819 9.8211a5.9847 5.9847 0 0 0-.5157-4.9108 6.0462 6.0462 0 0 0-6.5098-2.9A6.0651 6.0651 0 0 0 4.9807 4.1818a5.9847 5.9847 0 0 0-3.9977 2.9 6.0462 6.0462 0 0 0 .7427 7.0966 5.98 5.98 0 0 0 .511 4.9107 6.051 6.051 0 0 0 6.5146 2.9001A5.9847 5.9847 0 0 0 13.2599 24a6.0557 6.0557 0 0 0 5.7718-4.2057 5.9847 5.9847 0 0 0 3.989-2.9 6.051 6.051 0 0 0-.7388-7.0732z"
+                  fill="currentColor"
+                />
+                <motion.circle
+                  animate={{ 
+                    cx: 9.5 + eyeOffsetX, 
+                    cy: 10 + eyeOffsetY,
+                    scaleY: isBlinking ? 0.1 : 1
+                  }}
+                  transition={{ type: "spring", stiffness: 300, damping: 25 }}
+                  r="1.5"
+                  fill="white"
+                  className="dark:fill-black"
+                  style={{ transformOrigin: `${9.5 + eyeOffsetX}px ${10 + eyeOffsetY}px` }}
+                />
+                <motion.circle
+                  animate={{ 
+                    cx: 14.5 + eyeOffsetX, 
+                    cy: 10 + eyeOffsetY,
+                    scaleY: isBlinking ? 0.1 : 1
+                  }}
+                  transition={{ type: "spring", stiffness: 300, damping: 25 }}
+                  r="1.5"
+                  fill="white"
+                  className="dark:fill-black"
+                  style={{ transformOrigin: `${14.5 + eyeOffsetX}px ${10 + eyeOffsetY}px` }}
+                />
+              </motion.g>
+            )
+          })()}
+        </svg>
+      </div>
+    </div>
+  )
+})
+
+export default function Chat({ isTemporary, setIsTemporary }) {
   const ASK_ROADMAP = [
     { id: 'plan', label: 'Plan actions', status: 'pending', note: '' },
     { id: 'retrieve', label: 'Retrieve docs', status: 'pending', note: '' },
@@ -306,15 +425,15 @@ export default function Chat() {
       // Human voice is mostly below 8kHz. With fftSize=256 and sampleRate=48kHz, 
       // bin resolution is ~187Hz. 40 bins * 187Hz = 7.5kHz.
       // We take the first 48 bins and map them to 12 bars (since we mirror the other 12).
-      const usefulBins = 48 
-      const sliceSize = Math.floor(usefulBins / (bars / 2)) 
+      const usefulBins = 48
+      const sliceSize = Math.floor(usefulBins / (bars / 2))
       const rawLevels = []
       for (let i = 0; i < bars / 2; i++) {
         let sum = 0
         for (let j = 0; j < sliceSize; j++) sum += data[i * sliceSize + j]
         rawLevels.push(sum / sliceSize / 255)
       }
-      
+
       const levels = new Array(bars).fill(0)
       for (let i = 0; i < bars / 2; i++) {
         // Boost the higher frequencies slightly so edges move more visibly
@@ -487,9 +606,9 @@ export default function Chat() {
   // This avoids IPC race conditions between siblings.
   useEffect(() => {
     window.dispatchEvent(new CustomEvent('scark:activeChatChanged', {
-      detail: { chatId: activeChatId, messageCount: messages.length, title: activeChatTitle }
+      detail: { chatId: activeChatId, messageCount: messages.length, title: activeChatTitle, isTemporary }
     }))
-  }, [messages.length, activeChatId, activeChatTitle])
+  }, [messages.length, activeChatId, activeChatTitle, isTemporary])
 
   // Keep the shared ref up to date so the title-override event handler
   // always compares against the CURRENT activeChatId (avoids stale closure).
@@ -598,11 +717,12 @@ export default function Chat() {
   }, [])
 
   const loadChatSession = useCallback(async (chatId) => {
-    if (!chatId || !window.scark?.chat?.get) return
+    if (!chatId || !window.scark?.chat?.get || chatId === 'temp') return
     const session = await window.scark.chat.get(chatId)
     if (!session) return
 
     resetTransientState()
+    if (isTemporary && setIsTemporary) setIsTemporary(false)
     setActiveChatId(session.id)
     setActiveChatTitle(session.title || 'New chat')
     setChatSummary(session.summary || '')
@@ -619,7 +739,7 @@ export default function Chat() {
         if (Array.isArray(parsed)) {
           loadedVersions = new Map(parsed)
         }
-      } catch (e) {}
+      } catch (e) { }
     }
     setTurnVersions(loadedVersions)
     setEditingTurn(null)
@@ -627,12 +747,13 @@ export default function Chat() {
 
   // Persist turn versions specifically whenever they mutate
   useEffect(() => {
-    if (!activeChatId) return
+    if (!activeChatId || isTemporary) return
     const str = JSON.stringify(Array.from(turnVersions.entries()))
-    window.scark?.chat?.setTurnVersions?.(activeChatId, str).catch(() => {})
-  }, [turnVersions, activeChatId])
+    window.scark?.chat?.setTurnVersions?.(activeChatId, str).catch(() => { })
+  }, [turnVersions, activeChatId, isTemporary])
 
   const ensureActiveChat = useCallback(async () => {
+    if (isTemporary) return { id: 'temp', title: 'Temporary Chat' }
     if (activeChatId) return { id: activeChatId, title: activeChatTitle }
     const created = await window.scark?.chat?.create?.({ title: 'New chat', select: false })
     if (!created?.id) throw new Error('Failed to create chat')
@@ -640,10 +761,10 @@ export default function Chat() {
     setActiveChatTitle(created.title || 'New chat')
     setChatSummary('')
     return { id: created.id, title: created.title || 'New chat' }
-  }, [activeChatId, activeChatTitle])
+  }, [activeChatId, activeChatTitle, isTemporary])
 
   const maybeGenerateChatTitle = useCallback(async (chatId, currentTitle, firstUserQuery) => {
-    if (!chatId || !firstUserQuery || (currentTitle && currentTitle !== 'New chat')) return
+    if (!chatId || !firstUserQuery || (currentTitle && currentTitle !== 'New chat') || isTemporary || chatId === 'temp') return
     try {
       const raw = await webllmComplete([
         {
@@ -675,7 +796,7 @@ export default function Chat() {
   }, [])
 
   const updateRollingSummary = useCallback(async (chatId, userText, assistantText) => {
-    if (!chatId || !assistantText) return
+    if (!chatId || !assistantText || isTemporary || chatId === 'temp') return
     try {
       const nextSummary = await webllmComplete([
         {
@@ -756,6 +877,16 @@ export default function Chat() {
       delete window.__scarkActiveChatIdRef
     }
   }, [loadChatSession, resetTransientState])
+
+  useEffect(() => {
+    if (isTemporary) {
+      resetTransientState()
+      setActiveChatId(null)
+      setActiveChatTitle('Temporary Chat')
+      setTurnVersions(new Map())
+      setMessages([])
+    }
+  }, [isTemporary, resetTransientState])
 
   useEffect(() => {
     if (!isTyping && queuedMessage) {
@@ -846,10 +977,10 @@ export default function Chat() {
     // Ask mode prioritizes responsiveness over exhaustive retrieval.
     const normalizedActions = queryMode === 'ask'
       ? cappedActions.filter((a, idx) => {
-          if (a.tool !== 'web_search') return true
-          const firstWebIdx = cappedActions.findIndex(x => x.tool === 'web_search')
-          return idx === firstWebIdx
-        })
+        if (a.tool !== 'web_search') return true
+        const firstWebIdx = cappedActions.findIndex(x => x.tool === 'web_search')
+        return idx === firstWebIdx
+      })
       : cappedActions
 
     for (let i = 0; i < normalizedActions.length; i++) {
@@ -939,9 +1070,9 @@ export default function Chat() {
     const modeLabel = queryMode === 'research' ? 'Deep Research' : 'Ask'
     const actionLines = actions.length
       ? actions.map((a, idx) => {
-          const arg = a.args?.query || a.args?.url || ''
-          return `${idx + 1}. ${a.tool}${arg ? ` -> ${arg}` : ''}`
-        }).join('\n')
+        const arg = a.args?.query || a.args?.url || ''
+        return `${idx + 1}. ${a.tool}${arg ? ` -> ${arg}` : ''}`
+      }).join('\n')
       : '1. none'
 
     const reflectionExcerpt = (reflectionNotes || '')
@@ -1038,13 +1169,15 @@ export default function Chat() {
 
     // Persist user turn immediately.
     try {
-      await window.scark?.chat?.addMessage?.({
-        chatId,
-        role: 'user',
-        content: queryText,
-        reasoningPreview: '',
-      })
-      maybeGenerateChatTitle(chatId, chatTitle, queryText)
+      if (!isTemporary && chatId !== 'temp') {
+        await window.scark?.chat?.addMessage?.({
+          chatId,
+          role: 'user',
+          content: queryText,
+          reasoningPreview: '',
+        })
+        maybeGenerateChatTitle(chatId, chatTitle, queryText)
+      }
     } catch (e) {
       console.warn('[Chat] Failed to persist user message:', e?.message || e)
     }
@@ -1237,12 +1370,14 @@ export default function Chat() {
       patchLatestVersionRef.current?.(finalText)
 
       try {
-        await window.scark?.chat?.addMessage?.({
-          chatId,
-          role: 'assistant',
-          content: finalText,
-          reasoningPreview: streamingReasoningPreview || '',
-        })
+        if (!isTemporary && chatId !== 'temp') {
+          await window.scark?.chat?.addMessage?.({
+            chatId,
+            role: 'assistant',
+            content: finalText,
+            reasoningPreview: streamingReasoningPreview || '',
+          })
+        }
       } catch (e) {
         console.warn('[Chat] Failed to persist assistant message:', e?.message || e)
       }
@@ -1329,7 +1464,7 @@ export default function Chat() {
     const msgsUpToTurn = messages.slice(0, turn.startIndex)
 
     // Remove the old completion from the DB so it doesn't duplicate on page reload
-    if (activeChatId) {
+    if (activeChatId && !isTemporary && activeChatId !== 'temp') {
       await window.scark?.chat?.truncate?.(activeChatId, turn.startIndex)
     }
 
@@ -1379,7 +1514,7 @@ export default function Chat() {
     if (partial) {
       streamBufferRef.current = ''
       setMessages(msgs => [...msgs, { role: 'assistant', content: partial, reasoningPreview: streamingReasoningPreview }])
-      if (activeChatId) {
+      if (activeChatId && !isTemporary && activeChatId !== 'temp') {
         try {
           await window.scark?.chat?.addMessage?.({
             chatId: activeChatId,
@@ -1423,128 +1558,178 @@ export default function Chat() {
         onDrop={handleDrop}
       >
         <div className="w-full max-w-5xl mx-auto px-6 py-6 pb-12 space-y-6 flex flex-col min-h-full">
-        {messages.length === 0 && (
-          <div className="flex-1 flex flex-col items-center justify-center space-y-4 pt-10">
-            <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.2, duration: 0.5 }} className="inline-block text-center">
-              <h1 className="text-3xl font-medium tracking-tight bg-clip-text text-transparent bg-linear-to-r dark:from-white/90 dark:to-white/40 from-black/90 to-black/40 pb-1">
-                How can I help today?
-              </h1>
-              <motion.div className="h-px bg-linear-to-r dark:from-transparent dark:via-white/20 dark:to-transparent from-transparent via-black/20 to-transparent my-2" initial={{ width: 0, opacity: 0 }} animate={{ width: "100%", opacity: 1 }} transition={{ delay: 0.5, duration: 0.8 }} />
-              <p className="text-sm dark:text-white/40 text-black/40">Type a command or ask a question</p>
-            </motion.div>
-          </div>
-        )}
+          {messages.length === 0 && (
+            <div className="flex-1 flex flex-col items-center justify-center space-y-4 pt-10">
+              <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.2, duration: 0.5 }} className="inline-block text-center">
+                <AnimatedLogo mousePosition={mousePosition} />
+                <h1 className="text-3xl font-medium tracking-tight bg-clip-text text-transparent bg-linear-to-r dark:from-white/90 dark:to-white/40 from-black/90 to-black/40 pb-1">
+                  How can I help today?
+                </h1>
+                <motion.div className="h-px bg-linear-to-r dark:from-transparent dark:via-white/20 dark:to-transparent from-transparent via-black/20 to-transparent my-2" initial={{ width: 0, opacity: 0 }} animate={{ width: "100%", opacity: 1 }} transition={{ delay: 0.5, duration: 0.8 }} />
+                <p className="text-sm dark:text-white/40 text-black/40">Type a command or ask a question</p>
+              </motion.div>
+            </div>
+          )}
 
-        {(() => {
-          const groupedTurns = getGroupedTurns(messages)
-          return groupedTurns.map((turn, turnIndex) => {
-            const isLastTurn = turnIndex === groupedTurns.length - 1
-            const vEntry = turnVersions.get(turnIndex)
-            // What to actually display for this turn
-            const displayUserContent = vEntry
-              ? vEntry.versions[vEntry.currentIdx].userContent
-              : turn.userMsg.content
-            const displayAssistantContent = vEntry
-              ? vEntry.versions[vEntry.currentIdx].assistantContent || turn.assistantMsg?.content || ''
-              : turn.assistantMsg?.content || ''
-            const versionCount = vEntry ? vEntry.versions.length : 1
-            const currentVersionNum = vEntry ? vEntry.currentIdx + 1 : 1
-            const isEditing = editingTurn?.turnIndex === turnIndex
+          {(() => {
+            const groupedTurns = getGroupedTurns(messages)
+            return groupedTurns.map((turn, turnIndex) => {
+              const isLastTurn = turnIndex === groupedTurns.length - 1
+              const vEntry = turnVersions.get(turnIndex)
+              // What to actually display for this turn
+              const displayUserContent = vEntry
+                ? vEntry.versions[vEntry.currentIdx].userContent
+                : turn.userMsg.content
+              const displayAssistantContent = vEntry
+                ? vEntry.versions[vEntry.currentIdx].assistantContent || turn.assistantMsg?.content || ''
+                : turn.assistantMsg?.content || ''
+              const versionCount = vEntry ? vEntry.versions.length : 1
+              const currentVersionNum = vEntry ? vEntry.currentIdx + 1 : 1
+              const isEditing = editingTurn?.turnIndex === turnIndex
 
-            return (
-              <React.Fragment key={turnIndex}>
-                {/* USER MESSAGE */}
-                <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="flex justify-end">
-                  <div className="max-w-[80%] group relative">
-                    {/* Bubble */}
-                    {isEditing ? (
-                      <div className="flex flex-col gap-2 items-end">
-                        <textarea
-                          autoFocus
-                          value={editingTurn.value}
-                          onChange={e => setEditingTurn(prev => ({ ...prev, value: e.target.value }))}
-                          onKeyDown={e => {
-                            if (e.key === 'Enter' && !e.shiftKey) {
-                              e.preventDefault()
-                              handleEditSubmit(turnIndex, editingTurn.value, groupedTurns)
-                            }
-                            if (e.key === 'Escape') setEditingTurn(null)
-                          }}
-                          className="w-80 min-h-[60px] bg-zinc-100 dark:bg-white/10 text-gray-900 dark:text-white text-sm px-4 py-3 rounded-2xl outline-none ring-2 ring-violet-500/40 resize-none"
-                          rows={3}
-                        />
-                        <div className="flex gap-2">
-                          <button onClick={() => setEditingTurn(null)} className="text-xs px-3 py-1.5 rounded-lg bg-zinc-200 dark:bg-white/10 text-gray-600 dark:text-gray-400 hover:bg-zinc-300 dark:hover:bg-white/20 transition-colors">Cancel</button>
-                          <button onClick={() => handleEditSubmit(turnIndex, editingTurn.value, groupedTurns)} className="text-xs px-3 py-1.5 rounded-lg bg-violet-600 text-white hover:bg-violet-700 transition-colors">Send</button>
-                        </div>
-                      </div>
-                    ) : (
-                      <div className="px-5 py-3 rounded-2xl whitespace-pre-wrap text-sm leading-snug bg-primary text-primary-foreground dark:bg-white/10 dark:text-white bg-black/5 text-black">
-                        {displayUserContent}
-                      </div>
-                    )}
-
-                    {/* Toolbar: copy, edit, version nav */}
-                    {!isEditing && (
-                      <div className="flex items-center justify-end gap-1.5 mt-1.5 opacity-0 group-hover:opacity-100 transition-opacity duration-150">
-                        {/* Version nav: only if > 1 version */}
-                        {versionCount > 1 && (
-                          <div className="flex items-center gap-1 text-xs text-gray-400 dark:text-gray-500">
-                            <button
-                              onClick={() => navigateTurnVersion(turnIndex, -1)}
-                              disabled={currentVersionNum === 1}
-                              className="p-1 rounded hover:bg-zinc-200 dark:hover:bg-white/10 disabled:opacity-30 transition-colors"
-                            >
-                              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-3 h-3"><path d="M15 18l-6-6 6-6"/></svg>
-                            </button>
-                            <span className="font-mono tabular-nums px-1">{currentVersionNum}/{versionCount}</span>
-                            <button
-                              onClick={() => navigateTurnVersion(turnIndex, 1)}
-                              disabled={currentVersionNum === versionCount}
-                              className="p-1 rounded hover:bg-zinc-200 dark:hover:bg-white/10 disabled:opacity-30 transition-colors"
-                            >
-                              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-3 h-3"><path d="M9 18l6-6-6-6"/></svg>
-                            </button>
+              return (
+                <React.Fragment key={turnIndex}>
+                  {/* USER MESSAGE */}
+                  <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="flex justify-end">
+                    <div className="max-w-[80%] group relative">
+                      {/* Bubble */}
+                      {isEditing ? (
+                        <div className="flex flex-col gap-2 items-end">
+                          <textarea
+                            autoFocus
+                            value={editingTurn.value}
+                            onChange={e => setEditingTurn(prev => ({ ...prev, value: e.target.value }))}
+                            onKeyDown={e => {
+                              if (e.key === 'Enter' && !e.shiftKey) {
+                                e.preventDefault()
+                                handleEditSubmit(turnIndex, editingTurn.value, groupedTurns)
+                              }
+                              if (e.key === 'Escape') setEditingTurn(null)
+                            }}
+                            className="w-80 min-h-[60px] bg-zinc-100 dark:bg-white/10 text-gray-900 dark:text-white text-sm px-4 py-3 rounded-2xl outline-none ring-2 ring-violet-500/40 resize-none"
+                            rows={3}
+                          />
+                          <div className="flex gap-2">
+                            <button onClick={() => setEditingTurn(null)} className="text-xs px-3 py-1.5 rounded-lg bg-zinc-200 dark:bg-white/10 text-gray-600 dark:text-gray-400 hover:bg-zinc-300 dark:hover:bg-white/20 transition-colors">Cancel</button>
+                            <button onClick={() => handleEditSubmit(turnIndex, editingTurn.value, groupedTurns)} className="text-xs px-3 py-1.5 rounded-lg bg-violet-600 text-white hover:bg-violet-700 transition-colors">Send</button>
                           </div>
-                        )}
-                        {/* Copy */}
-                        <button
-                          title="Copy message"
-                          onClick={() => window.scark?.utils?.copyToClipboard?.(displayUserContent)}
-                          className="p-1.5 rounded-lg text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 hover:bg-zinc-200 dark:hover:bg-white/10 transition-colors"
-                        >
-                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-3.5 h-3.5"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
-                        </button>
-                        {/* Edit — only on last turn */}
-                        {isLastTurn && !isTyping && (
+                        </div>
+                      ) : (
+                        <div className="px-5 py-3 rounded-2xl whitespace-pre-wrap text-sm leading-snug bg-primary text-primary-foreground dark:bg-white/10 dark:text-white bg-black/5 text-black">
+                          {displayUserContent}
+                        </div>
+                      )}
+
+                      {/* Toolbar: copy, edit, version nav */}
+                      {!isEditing && (
+                        <div className="flex items-center justify-end gap-1.5 mt-1.5 opacity-0 group-hover:opacity-100 transition-opacity duration-150">
+                          {/* Version nav: only if > 1 version */}
+                          {versionCount > 1 && (
+                            <div className="flex items-center gap-1 text-xs text-gray-400 dark:text-gray-500">
+                              <button
+                                onClick={() => navigateTurnVersion(turnIndex, -1)}
+                                disabled={currentVersionNum === 1}
+                                className="p-1 rounded hover:bg-zinc-200 dark:hover:bg-white/10 disabled:opacity-30 transition-colors"
+                              >
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-3 h-3"><path d="M15 18l-6-6 6-6" /></svg>
+                              </button>
+                              <span className="font-mono tabular-nums px-1">{currentVersionNum}/{versionCount}</span>
+                              <button
+                                onClick={() => navigateTurnVersion(turnIndex, 1)}
+                                disabled={currentVersionNum === versionCount}
+                                className="p-1 rounded hover:bg-zinc-200 dark:hover:bg-white/10 disabled:opacity-30 transition-colors"
+                              >
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-3 h-3"><path d="M9 18l6-6-6-6" /></svg>
+                              </button>
+                            </div>
+                          )}
+                          {/* Copy */}
                           <button
-                            title="Edit message"
-                            onClick={() => setEditingTurn({ turnIndex, value: turn.userMsg.content })}
+                            title="Copy message"
+                            onClick={() => window.scark?.utils?.copyToClipboard?.(displayUserContent)}
                             className="p-1.5 rounded-lg text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 hover:bg-zinc-200 dark:hover:bg-white/10 transition-colors"
                           >
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-3.5 h-3.5"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-3.5 h-3.5"><rect x="9" y="9" width="13" height="13" rx="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" /></svg>
                           </button>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                </motion.div>
+                          {/* Edit — only on last turn */}
+                          {isLastTurn && !isTyping && (
+                            <button
+                              title="Edit message"
+                              onClick={() => setEditingTurn({ turnIndex, value: turn.userMsg.content })}
+                              className="p-1.5 rounded-lg text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 hover:bg-zinc-200 dark:hover:bg-white/10 transition-colors"
+                            >
+                              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-3.5 h-3.5"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" /><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" /></svg>
+                            </button>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  </motion.div>
 
-                {/* ASSISTANT MESSAGE for this turn */}
-                {(turn.assistantMsg || (isLastTurn && isTyping)) && (
-                  <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="flex justify-start">
-                    <div className="max-w-[80%] group relative dark:text-gray-200 text-gray-800">
-                      {/* Show versioned assistant content when navigating, otherwise show real msg */}
-                      {vEntry && vEntry.currentIdx < vEntry.versions.length - 1 ? (
-                        // Navigated to older version — render with full markdown formatting
-                        displayAssistantContent ? (
+                  {/* ASSISTANT MESSAGE for this turn */}
+                  {(turn.assistantMsg || (isLastTurn && isTyping)) && (
+                    <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="flex justify-start">
+                      <div className="max-w-[80%] group relative dark:text-gray-200 text-gray-800">
+                        {/* Show versioned assistant content when navigating, otherwise show real msg */}
+                        {vEntry && vEntry.currentIdx < vEntry.versions.length - 1 ? (
+                          // Navigated to older version — render with full markdown formatting
+                          displayAssistantContent ? (
+                            <article
+                              className="prose dark:prose-invert max-w-none prose-pre:bg-transparent prose-pre:p-0 prose-headings:my-1 prose-ul:my-0 prose-li:my-0 pb-1 leading-relaxed prose-code:before:content-none prose-code:after:content-none"
+                              style={{ fontFamily: 'ui-serif, Georgia, Cambria, "Times New Roman", Times, serif', fontSize: '16px' }}
+                            >
+                              <ReactMarkdown
+                                remarkPlugins={[remarkGfm, remarkBreaks, remarkExternalLinks]}
+                                components={{
+                                  code({ node, inline, className, children, ...props }) {
+                                    const match = /language-(\w+)/.exec(className || '')
+                                    return !inline && match ? (
+                                      <CodeBlock language={match[1]} value={String(children).replace(/\n$/, '')} {...props} />
+                                    ) : (
+                                      <code className={cn("bg-black/10 dark:bg-white/10 px-1 rounded", className)} {...props}>{children}</code>
+                                    )
+                                  }
+                                }}
+                              >
+                                {displayAssistantContent}
+                              </ReactMarkdown>
+                            </article>
+                          ) : (
+                            <span className="text-gray-400 italic text-xs">Response not yet available for this version</span>
+                          )
+                        ) : turn.assistantMsg ? (
                           <article
-                            className="prose dark:prose-invert max-w-none prose-p:my-0 prose-pre:bg-transparent prose-pre:p-0 prose-headings:my-1 prose-ul:my-0 prose-li:my-0 pb-1 leading-snug prose-code:before:content-none prose-code:after:content-none"
+                            className="prose dark:prose-invert max-w-none prose-pre:bg-transparent prose-pre:p-0 prose-headings:my-1 prose-ul:my-0 prose-li:my-0 pb-1 leading-relaxed prose-code:before:content-none prose-code:after:content-none"
                             style={{ fontFamily: 'ui-serif, Georgia, Cambria, "Times New Roman", Times, serif', fontSize: '16px' }}
                           >
+                            {turn.assistantMsg.reasoningPreview ? (
+                              <details className="mb-3 rounded-lg border border-black/10 dark:border-white/10 bg-black/5 dark:bg-white/5 px-3 py-2 font-sans">
+                                <summary className="cursor-pointer text-xs font-medium text-foreground/70 select-none">Reasoning preview</summary>
+                                <pre className="mt-2 whitespace-pre-wrap text-[11px] leading-relaxed text-foreground/65 font-mono">{turn.assistantMsg.reasoningPreview}</pre>
+                              </details>
+                            ) : null}
                             <ReactMarkdown
                               remarkPlugins={[remarkGfm, remarkBreaks, remarkExternalLinks]}
                               components={{
+                                a({ href, children }) {
+                                  const isRawUrl = typeof children?.[0] === 'string' && children[0] === href;
+                                  let displayText = children;
+                                  let domain = '';
+                                  try { const urlObj = new URL(href); domain = urlObj.hostname.replace(/^www\./, ''); } catch (e) { domain = href; }
+                                  if (isRawUrl) { displayText = domain + (href.length > domain.length + 8 ? '...' : ''); }
+                                  return (
+                                    <span className="relative inline-block group mx-1 align-middle">
+                                      <a href={href} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-black/5 dark:bg-white/10 hover:bg-black/10 dark:hover:bg-white/20 text-xs font-sans text-gray-700 dark:text-gray-300 no-underline transition-all ring-1 ring-black/5 dark:ring-white/10">
+                                        <Globe className="w-3 h-3 opacity-70 shrink-0" />
+                                        <span className="truncate max-w-30">{domain}</span>
+                                      </a>
+                                      <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-64 p-3 bg-white dark:bg-[#1C1C1C] rounded-xl shadow-xl border border-black/5 dark:border-white/10 opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all duration-200 z-50 text-left font-sans flex flex-col gap-1.5 transform scale-95 group-hover:scale-100 origin-bottom pointer-events-none">
+                                        <div className="flex items-center gap-2 text-xs font-semibold text-gray-700 dark:text-gray-300"><Globe className="w-3.5 h-3.5 opacity-70 shrink-0" /><span className="truncate">{domain}</span></div>
+                                        <div className="text-[13px] font-normal text-gray-600 dark:text-gray-400 line-clamp-3 leading-snug break-all">{href}</div>
+                                      </div>
+                                    </span>
+                                  );
+                                },
                                 code({ node, inline, className, children, ...props }) {
                                   const match = /language-(\w+)/.exec(className || '')
                                   return !inline && match ? (
@@ -1555,197 +1740,148 @@ export default function Chat() {
                                 }
                               }}
                             >
-                              {displayAssistantContent}
+                              {turn.assistantMsg.content}
                             </ReactMarkdown>
                           </article>
-                        ) : (
-                          <span className="text-gray-400 italic text-xs">Response not yet available for this version</span>
-                        )
-                      ) : turn.assistantMsg ? (
-                        <article
-                          className="prose dark:prose-invert max-w-none prose-p:my-0 prose-pre:bg-transparent prose-pre:p-0 prose-headings:my-1 prose-ul:my-0 prose-li:my-0 pb-1 leading-snug prose-code:before:content-none prose-code:after:content-none"
-                          style={{ fontFamily: 'ui-serif, Georgia, Cambria, "Times New Roman", Times, serif', fontSize: '16px' }}
-                        >
-                          {turn.assistantMsg.reasoningPreview ? (
-                            <details className="mb-3 rounded-lg border border-black/10 dark:border-white/10 bg-black/5 dark:bg-white/5 px-3 py-2 font-sans">
-                              <summary className="cursor-pointer text-xs font-medium text-foreground/70 select-none">Reasoning preview</summary>
-                              <pre className="mt-2 whitespace-pre-wrap text-[11px] leading-relaxed text-foreground/65 font-mono">{turn.assistantMsg.reasoningPreview}</pre>
-                            </details>
-                          ) : null}
-                          <ReactMarkdown
-                            remarkPlugins={[remarkGfm, remarkBreaks, remarkExternalLinks]}
-                            components={{
-                              a({ href, children }) {
-                                const isRawUrl = typeof children?.[0] === 'string' && children[0] === href;
-                                let displayText = children;
-                                let domain = '';
-                                try { const urlObj = new URL(href); domain = urlObj.hostname.replace(/^www\./, ''); } catch (e) { domain = href; }
-                                if (isRawUrl) { displayText = domain + (href.length > domain.length + 8 ? '...' : ''); }
-                                return (
-                                  <span className="relative inline-block group mx-1 align-middle">
-                                    <a href={href} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-black/5 dark:bg-white/10 hover:bg-black/10 dark:hover:bg-white/20 text-xs font-sans text-gray-700 dark:text-gray-300 no-underline transition-all ring-1 ring-black/5 dark:ring-white/10">
-                                      <Globe className="w-3 h-3 opacity-70 shrink-0" />
-                                      <span className="truncate max-w-30">{domain}</span>
-                                    </a>
-                                    <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-64 p-3 bg-white dark:bg-[#1C1C1C] rounded-xl shadow-xl border border-black/5 dark:border-white/10 opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all duration-200 z-50 text-left font-sans flex flex-col gap-1.5 transform scale-95 group-hover:scale-100 origin-bottom pointer-events-none">
-                                       <div className="flex items-center gap-2 text-xs font-semibold text-gray-700 dark:text-gray-300"><Globe className="w-3.5 h-3.5 opacity-70 shrink-0" /><span className="truncate">{domain}</span></div>
-                                       <div className="text-[13px] font-normal text-gray-600 dark:text-gray-400 line-clamp-3 leading-snug break-all">{href}</div>
-                                    </div>
-                                  </span>
-                                );
-                              },
-                              code({ node, inline, className, children, ...props }) {
-                                const match = /language-(\w+)/.exec(className || '')
-                                return !inline && match ? (
-                                  <CodeBlock language={match[1]} value={String(children).replace(/\n$/, '')} {...props} />
-                                ) : (
-                                  <code className={cn("bg-black/10 dark:bg-white/10 px-1 rounded", className)} {...props}>{children}</code>
-                                )
-                              }
-                            }}
-                          >
-                            {turn.assistantMsg.content}
-                          </ReactMarkdown>
-                        </article>
-                      ) : null}
-                      {/* Copy button for assistant messages */}
-                      {turn.assistantMsg && (
-                        <div className="flex items-center gap-1.5 mt-1 opacity-0 group-hover:opacity-100 transition-opacity duration-150">
-                          <button
-                            title="Copy response"
-                            onClick={() => window.scark?.utils?.copyToClipboard?.(turn.assistantMsg.content)}
-                            className="p-1.5 rounded-lg text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 hover:bg-zinc-100 dark:hover:bg-white/10 transition-colors"
-                          >
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-3.5 h-3.5"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
-                          </button>
-                        </div>
-                      )}
-                    </div>
-                  </motion.div>
-                )}
-              </React.Fragment>
-            )
-          })
-        })()}
-
-        {/* LLM Thinking/Streaming State in the Main Chat Area (Like Claude/GPT) */}
-        {isTyping && (
-          <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="flex justify-start">
-            <div className="max-w-[80%] px-5 py-3 rounded-2xl dark:text-gray-200 text-gray-800 whitespace-pre-wrap text-sm leading-relaxed">
-              {!streamingContent ? (
-                /* Shimmering loader when not streaming tokens yet */
-                <div className="space-y-3">
-                  <div className="flex items-center gap-2 h-8">
-                    <Sparkles className="w-4 h-4 text-black dark:text-white animate-pulse" />
-                    <span
-                      className="font-medium tracking-wide bg-clip-text text-transparent bg-size-[200%_auto] animate-shimmer"
-                      style={{ backgroundImage: 'linear-gradient(90deg, var(--color-foreground) 0%, gray 50%, var(--color-foreground) 100%)' }}
-                    >
-                      {status || 'Thinking deeply...'}
-                    </span>
-                  </div>
-
-                  {agentRoadmap && (
-                    <div className="rounded-xl border border-black/10 dark:border-white/10 bg-black/5 dark:bg-white/5 p-3 text-xs font-mono space-y-1.5">
-                      <p className="font-semibold text-foreground/80 mb-1">Roadmap</p>
-                      {agentRoadmap.map((step, idx) => (
-                        <div key={step.id} className="flex items-start gap-2 text-foreground/70">
-                          <span className="w-4 inline-block">{step.status === 'completed' ? '✓' : step.status === 'in_progress' ? '>' : '-'}</span>
-                          <div className="flex-1">
-                            <p>{idx + 1}. {step.label}</p>
-                            {step.note ? <p className="text-[11px] text-foreground/50 whitespace-pre-wrap">{step.note}</p> : null}
+                        ) : null}
+                        {/* Copy button for assistant messages */}
+                        {turn.assistantMsg && (
+                          <div className="flex items-center gap-1.5 mt-1 opacity-0 group-hover:opacity-100 transition-opacity duration-150">
+                            <button
+                              title="Copy response"
+                              onClick={() => window.scark?.utils?.copyToClipboard?.(turn.assistantMsg.content)}
+                              className="p-1.5 rounded-lg text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 hover:bg-zinc-100 dark:hover:bg-white/10 transition-colors"
+                            >
+                              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-3.5 h-3.5"><rect x="9" y="9" width="13" height="13" rx="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" /></svg>
+                            </button>
                           </div>
-                        </div>
-                      ))}
-                    </div>
+                        )}
+                      </div>
+                    </motion.div>
                   )}
-                </div>
-              ) : (
-                /* Streaming text view */
-                <div className="space-y-3">
-                  {streamingReasoningPreview ? (
-                    <details className="rounded-lg border border-black/10 dark:border-white/10 bg-black/5 dark:bg-white/5 px-3 py-2 font-sans">
-                      <summary className="cursor-pointer text-xs font-medium text-foreground/70 select-none">Reasoning preview</summary>
-                      <pre className="mt-2 whitespace-pre-wrap text-[11px] leading-relaxed text-foreground/65 font-mono">{streamingReasoningPreview}</pre>
-                    </details>
-                  ) : null}
+                </React.Fragment>
+              )
+            })
+          })()}
 
-                  <article 
-                    className="prose dark:prose-invert max-w-none prose-p:my-0 prose-pre:bg-transparent prose-pre:p-0 prose-headings:my-1 prose-ul:my-0 prose-li:my-0 pb-1 leading-snug overflow-hidden"
-                    style={{ fontFamily: 'ui-serif, Georgia, Cambria, "Times New Roman", Times, serif', fontSize: '16px' }}
-                  >
-                    <ReactMarkdown
-                      remarkPlugins={[remarkGfm, remarkBreaks, remarkExternalLinks]}
-                      components={{
-                        a({ href, children }) {
-                          const isRawUrl = typeof children?.[0] === 'string' && children[0] === href;
-                          let displayText = children;
-                          let domain = '';
-                          
-                          try {
-                            const urlObj = new URL(href);
-                            domain = urlObj.hostname.replace(/^www\./, '');
-                          } catch (e) {
-                            domain = href;
-                          }
+          {/* LLM Thinking/Streaming State in the Main Chat Area (Like Claude/GPT) */}
+          {isTyping && (
+            <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="flex justify-start">
+              <div className="max-w-[80%] px-5 py-3 rounded-2xl dark:text-gray-200 text-gray-800 whitespace-pre-wrap text-sm leading-relaxed">
+                {!streamingContent ? (
+                  /* Shimmering loader when not streaming tokens yet */
+                  <div className="space-y-3">
+                    <div className="flex items-center gap-2 h-8">
+                      <Sparkles className="w-4 h-4 text-black dark:text-white animate-pulse" />
+                      <span
+                        className="font-medium tracking-wide bg-clip-text text-transparent bg-size-[200%_auto] animate-shimmer"
+                        style={{ backgroundImage: 'linear-gradient(90deg, var(--color-foreground) 0%, gray 50%, var(--color-foreground) 100%)' }}
+                      >
+                        {status || 'Thinking deeply...'}
+                      </span>
+                    </div>
 
-                          if (isRawUrl) {
-                            displayText = domain + (href.length > domain.length + 8 ? '...' : '');
-                          }
-                          
-                          return (
-                            <span className="relative inline-block group mx-1 align-middle">
-                              <a href={href} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-black/5 dark:bg-white/10 hover:bg-black/10 dark:hover:bg-white/20 text-xs font-sans text-gray-700 dark:text-gray-300 no-underline transition-all ring-1 ring-black/5 dark:ring-white/10">
-                                <Globe className="w-3 h-3 opacity-70 shrink-0" />
-                                <span className="truncate max-w-30">{domain}</span>
-                              </a>
-                              
-                              {/* Hover Card */}
-                              <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-64 p-3 bg-white dark:bg-[#1C1C1C] rounded-xl shadow-xl border border-black/5 dark:border-white/10 opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all duration-200 z-50 text-left font-sans flex flex-col gap-1.5 transform scale-95 group-hover:scale-100 origin-bottom pointer-events-none">
-                                 <div className="flex items-center gap-2 text-xs font-semibold text-gray-700 dark:text-gray-300">
+                    {agentRoadmap && (
+                      <div className="rounded-xl border border-black/10 dark:border-white/10 bg-black/5 dark:bg-white/5 p-3 text-xs font-mono space-y-1.5">
+                        <p className="font-semibold text-foreground/80 mb-1">Roadmap</p>
+                        {agentRoadmap.map((step, idx) => (
+                          <div key={step.id} className="flex items-start gap-2 text-foreground/70">
+                            <span className="w-4 inline-block">{step.status === 'completed' ? '✓' : step.status === 'in_progress' ? '>' : '-'}</span>
+                            <div className="flex-1">
+                              <p>{idx + 1}. {step.label}</p>
+                              {step.note ? <p className="text-[11px] text-foreground/50 whitespace-pre-wrap">{step.note}</p> : null}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  /* Streaming text view */
+                  <div className="space-y-3">
+                    {streamingReasoningPreview ? (
+                      <details className="rounded-lg border border-black/10 dark:border-white/10 bg-black/5 dark:bg-white/5 px-3 py-2 font-sans">
+                        <summary className="cursor-pointer text-xs font-medium text-foreground/70 select-none">Reasoning preview</summary>
+                        <pre className="mt-2 whitespace-pre-wrap text-[11px] leading-relaxed text-foreground/65 font-mono">{streamingReasoningPreview}</pre>
+                      </details>
+                    ) : null}
+
+                    <article
+                      className="prose dark:prose-invert max-w-none prose-pre:bg-transparent prose-pre:p-0 prose-headings:my-1 prose-ul:my-0 prose-li:my-0 pb-1 leading-relaxed overflow-hidden"
+                      style={{ fontFamily: 'ui-serif, Georgia, Cambria, "Times New Roman", Times, serif', fontSize: '16px' }}
+                    >
+                      <ReactMarkdown
+                        remarkPlugins={[remarkGfm, remarkBreaks, remarkExternalLinks]}
+                        components={{
+                          a({ href, children }) {
+                            const isRawUrl = typeof children?.[0] === 'string' && children[0] === href;
+                            let displayText = children;
+                            let domain = '';
+
+                            try {
+                              const urlObj = new URL(href);
+                              domain = urlObj.hostname.replace(/^www\./, '');
+                            } catch (e) {
+                              domain = href;
+                            }
+
+                            if (isRawUrl) {
+                              displayText = domain + (href.length > domain.length + 8 ? '...' : '');
+                            }
+
+                            return (
+                              <span className="relative inline-block group mx-1 align-middle">
+                                <a href={href} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-black/5 dark:bg-white/10 hover:bg-black/10 dark:hover:bg-white/20 text-xs font-sans text-gray-700 dark:text-gray-300 no-underline transition-all ring-1 ring-black/5 dark:ring-white/10">
+                                  <Globe className="w-3 h-3 opacity-70 shrink-0" />
+                                  <span className="truncate max-w-30">{domain}</span>
+                                </a>
+
+                                {/* Hover Card */}
+                                <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-64 p-3 bg-white dark:bg-[#1C1C1C] rounded-xl shadow-xl border border-black/5 dark:border-white/10 opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all duration-200 z-50 text-left font-sans flex flex-col gap-1.5 transform scale-95 group-hover:scale-100 origin-bottom pointer-events-none">
+                                  <div className="flex items-center gap-2 text-xs font-semibold text-gray-700 dark:text-gray-300">
                                     <Globe className="w-3.5 h-3.5 opacity-70 shrink-0" />
                                     <span className="truncate">{domain}</span>
-                                 </div>
-                                 <div className="text-[13px] font-normal text-gray-600 dark:text-gray-400 line-clamp-3 leading-snug break-all">
+                                  </div>
+                                  <div className="text-[13px] font-normal text-gray-600 dark:text-gray-400 line-clamp-3 leading-snug break-all">
                                     {href}
-                                 </div>
+                                  </div>
+                                </div>
+                              </span>
+                            );
+                          },
+                          code({ node, inline, className, children, ...props }) {
+                            const match = /language-(\w+)/.exec(className || '')
+                            // Use a simpler static block for streaming content to avoid heavy SyntaxHighlighter stutter/jitter
+                            return !inline && match ? (
+                              <div className="my-2 rounded-xl overflow-hidden border border-white/5 bg-[#121212] p-4 font-mono text-[0.85rem] whitespace-pre tabular-nums">
+                                {children}
                               </div>
-                            </span>
-                          );
-                        },
-                        code({ node, inline, className, children, ...props }) {
-                          const match = /language-(\w+)/.exec(className || '')
-                          // Use a simpler static block for streaming content to avoid heavy SyntaxHighlighter stutter/jitter
-                          return !inline && match ? (
-                            <div className="my-2 rounded-xl overflow-hidden border border-white/5 bg-[#121212] p-4 font-mono text-[0.85rem] whitespace-pre tabular-nums">
-                              {children}
-                            </div>
-                          ) : (
-                            <code className={cn("bg-black/10 dark:bg-white/10 px-1 rounded", className)} {...props}>
-                              {children}
-                            </code>
-                          )
-                        }
-                      }}
-                    >
-                      {streamingContent + '`▍`'}
-                    </ReactMarkdown>
-                  </article>
-                </div>
-              )}
-            </div>
-          </motion.div>
-        )}
+                            ) : (
+                              <code className={cn("bg-black/10 dark:bg-white/10 px-1 rounded", className)} {...props}>
+                                {children}
+                              </code>
+                            )
+                          }
+                        }}
+                      >
+                        {streamingContent + '`▍`'}
+                      </ReactMarkdown>
+                    </article>
+                  </div>
+                )}
+              </div>
+            </motion.div>
+          )}
 
-        {sources.length > 0 && !isTyping && (
-          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex justify-start">
-            <div className="max-w-[75%] px-4 py-2 text-xs text-gray-500 space-y-1">
-              <p className="font-medium text-gray-400">Sources:</p>
-              {sources.map((s, i) => <p key={i} className="truncate">{i + 1}. {s.title || s.url}</p>)}
-            </div>
-          </motion.div>
-        )}
-        <div ref={messagesEndRef} className="h-4 shrink-0" />
+          {sources.length > 0 && !isTyping && (
+            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex justify-start">
+              <div className="max-w-[75%] px-4 py-2 text-xs text-gray-500 space-y-1">
+                <p className="font-medium text-gray-400">Sources:</p>
+                {sources.map((s, i) => <p key={i} className="truncate">{i + 1}. {s.title || s.url}</p>)}
+              </div>
+            </motion.div>
+          )}
+          <div ref={messagesEndRef} className="h-4 shrink-0" />
         </div>
       </div>
 
@@ -1949,33 +2085,33 @@ export default function Chat() {
             <div className="flex items-center gap-2 relative">
               <AnimatePresence mode="wait">
                 {isTyping && !value.trim() ? (
-                  <motion.button 
+                  <motion.button
                     key="stop-btn"
                     initial={{ opacity: 0, scale: 0.8 }}
                     animate={{ opacity: 1, scale: 1 }}
                     exit={{ opacity: 0, scale: 0.8 }}
-                    onClick={handleStopResponse} 
-                    whileHover={{ scale: 1.05 }} 
-                    whileTap={{ scale: 0.95 }} 
+                    onClick={handleStopResponse}
+                    whileHover={{ scale: 1.05 }}
+                    whileTap={{ scale: 0.95 }}
                     className="w-22 h-9 flex items-center justify-center gap-2 rounded-lg text-sm font-medium transition-all cursor-pointer bg-red-500/10 text-red-500 hover:bg-red-500/20 dark:bg-red-500/15 dark:hover:bg-red-500/25"
                   >
                     <div className="w-2.5 h-2.5 rounded-xs bg-current" />
                     <span>Stop</span>
                   </motion.button>
                 ) : (
-                  <motion.button 
+                  <motion.button
                     key="action-btn"
                     initial={{ opacity: 0, scale: 0.8 }}
                     animate={{ opacity: 1, scale: 1 }}
                     exit={{ opacity: 0, scale: 0.8 }}
-                    onClick={handleSendMessage} 
-                    whileHover={{ scale: 1.02 }} 
-                    whileTap={{ scale: 0.98 }} 
-                    disabled={!value.trim() || modelLoading} 
+                    onClick={handleSendMessage}
+                    whileHover={{ scale: 1.02 }}
+                    whileTap={{ scale: 0.98 }}
+                    disabled={!value.trim() || modelLoading}
                     className={cn(
-                      "min-w-22 h-9 px-4 rounded-lg text-sm font-medium transition-all flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50", 
+                      "min-w-22 h-9 px-4 rounded-lg text-sm font-medium transition-all flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50",
                       value.trim() && !modelLoading
-                        ? (isTyping ? "bg-violet-500 text-white shadow-lg hover:bg-violet-600 shadow-violet-500/25" : "dark:bg-white bg-black dark:text-[#0A0A0B] text-white shadow-lg") 
+                        ? (isTyping ? "bg-violet-500 text-white shadow-lg hover:bg-violet-600 shadow-violet-500/25" : "dark:bg-white bg-black dark:text-[#0A0A0B] text-white shadow-lg")
                         : "dark:bg-white/5 bg-black/5 text-muted-foreground"
                     )}
                   >
