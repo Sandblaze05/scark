@@ -1,6 +1,6 @@
 'use client'
 
-import React, { useRef, useState, useCallback, useEffect, useTransition } from 'react'
+import React, { useRef, useState, useCallback, useEffect, useTransition, useMemo } from 'react'
 import gsap from 'gsap'
 import {
   ImageIcon,
@@ -19,7 +19,9 @@ import {
   Search,
   FlaskConical,
   Mic,
-  Globe
+  Globe,
+  Volume2,
+  VolumeX
 } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { cn } from '../lib/utils'
@@ -179,7 +181,7 @@ function SoundWave({ levels }) {
   )
 }
 
-const AnimatedLogo = React.memo(({ mousePosition }) => {
+const AnimatedLogo = React.memo(({ mousePosition, className = '' }) => {
   const containerRef = useRef(null)
   const [rect, setRect] = useState(null)
   const [isBlinking, setIsBlinking] = useState(false)
@@ -231,7 +233,7 @@ const AnimatedLogo = React.memo(({ mousePosition }) => {
   const centerY = rect ? rect.top + rect.height / 2 : 0
 
   return (
-    <div className="flex justify-center mb-6 h-12">
+    <div className={cn("flex justify-center mb-6 h-12", className)}>
       <div ref={containerRef} className="relative w-12 h-12 flex items-center justify-center">
         <svg viewBox="0 0 24 24" className="w-10 h-10 overflow-visible text-black dark:text-white" xmlns="http://www.w3.org/2000/svg">
           {(() => {
@@ -298,6 +300,52 @@ const AnimatedLogo = React.memo(({ mousePosition }) => {
   )
 })
 
+const StarryIdleBackdrop = React.memo(function StarryIdleBackdrop() {
+  const [mounted, setMounted] = useState(false)
+
+  useEffect(() => {
+    setMounted(true)
+  }, [])
+
+  const stars = useMemo(
+    () => Array.from({ length: 70 }, (_, i) => ({
+      id: i,
+      left: Math.random() * 100,
+      bottom: Math.random() * 100,
+      size: Math.random() * 1.9 + 0.5,
+      alpha: Math.random() * 0.55 + 0.2,
+      duration: Math.random() * 30 + 26,
+      delay: Math.random() * -24,
+      blur: Math.random() > 0.7 ? 0.3 : 0,
+    })),
+    [mounted]
+  )
+
+  if (!mounted) return null
+
+  return (
+    <div className="pointer-events-none absolute inset-0 z-0 overflow-hidden">
+      <div className="starfield-aurora-layer" />
+      {stars.map((star) => (
+        <span
+          key={star.id}
+          className="starfield-star"
+          style={{
+            '--star-left': `${star.left}%`,
+            '--star-bottom': `${star.bottom}%`,
+            '--star-size': `${star.size}px`,
+            '--star-alpha': star.alpha,
+            '--star-dur': `${star.duration}s`,
+            '--star-delay': `${star.delay}s`,
+            '--star-blur': `${star.blur}px`,
+          }}
+        />
+      ))}
+      <div className="starfield-vignette" />
+    </div>
+  )
+})
+
 export default function Chat({ isTemporary, setIsTemporary }) {
     // Dynamic roadmap state will be built during execution.
 
@@ -306,6 +354,7 @@ export default function Chat({ isTemporary, setIsTemporary }) {
   const [attachments, setAttachments] = useState([])
   const [isTyping, setIsTyping] = useState(false)
   const [activeSuggestion, setActiveSuggestion] = useState(-1)
+  const [followUpSuggestions, setFollowUpSuggestions] = useState([])
   const [mousePosition, setMousePosition] = useState({ x: 0, y: 0 })
   const { textareaRef, adjustHeight } = useAutoResizeTextarea({ minHeight: 44, maxHeight: 200 })
   const [inputFocused, setInputFocused] = useState(false)
@@ -329,6 +378,9 @@ export default function Chat({ isTemporary, setIsTemporary }) {
   const audioChunksRef = useRef([])
   const workerRef = useRef(null)
   const workerHandlerRef = useRef(null)
+  const workerErrorHandlerRef = useRef(null)
+  const workerMessageErrorHandlerRef = useRef(null)
+  const transcriptionTimeoutRef = useRef(null)
 
   // WebLLM abort controller – set before each generation, cleared on stop/done
   const webllmAbortRef = useRef(null)
@@ -346,30 +398,114 @@ export default function Chat({ isTemporary, setIsTemporary }) {
     })
 
     const handleWorkerMessage = (e) => {
-      const { status, text, data, error } = e.data
+      const payload = (e && typeof e.data === 'object' && e.data !== null) ? e.data : {}
+      const { status, text, data, error } = payload
 
       if (status === 'progress') {
-        if (data.status === 'downloading' || data.status === 'init') {
+        if (transcriptionTimeoutRef.current) {
+          clearTimeout(transcriptionTimeoutRef.current)
+          transcriptionTimeoutRef.current = null
+        }
+        if (data && (data.status === 'downloading' || data.status === 'init')) {
           setTranscriptionStatus(`Loading AI Model... (${Math.round(data.progress || 0)}%)`)
         }
       } else if (status === 'decoding') {
+        if (transcriptionTimeoutRef.current) {
+          clearTimeout(transcriptionTimeoutRef.current)
+          transcriptionTimeoutRef.current = null
+        }
         setTranscriptionStatus('Transcribing audio...')
       } else if (status === 'complete') {
+        if (transcriptionTimeoutRef.current) {
+          clearTimeout(transcriptionTimeoutRef.current)
+          transcriptionTimeoutRef.current = null
+        }
         setIsTranscribing(false)
         setTranscriptionStatus('')
         const pre = preListenTextRef.current
         const sep = pre && !pre.endsWith(' ') ? ' ' : ''
-        setValue(pre + sep + text.trim())
+        const transcript = typeof text === 'string' ? text.trim() : ''
+        if (!transcript) return
+        setValue(pre + sep + transcript)
       } else if (status === 'error') {
-        console.error('Whisper worker error:', error)
+        if (transcriptionTimeoutRef.current) {
+          clearTimeout(transcriptionTimeoutRef.current)
+          transcriptionTimeoutRef.current = null
+        }
+        const normalizedError = (typeof error === 'string' && error.trim())
+          ? error
+          : (error?.message || String(error || 'Unknown Whisper worker error'))
+        if (error && typeof error === 'object') {
+          console.error('Whisper worker error:', normalizedError, {
+            name: error.name || null,
+            stack: error.stack || null,
+          })
+        } else {
+          console.error('Whisper worker error:', normalizedError)
+        }
         setIsTranscribing(false)
         setTranscriptionStatus('')
+        if (workerRef.current) {
+          if (workerHandlerRef.current) {
+            workerRef.current.removeEventListener('message', workerHandlerRef.current)
+          }
+          if (workerErrorHandlerRef.current) {
+            workerRef.current.removeEventListener('error', workerErrorHandlerRef.current)
+          }
+          if (workerMessageErrorHandlerRef.current) {
+            workerRef.current.removeEventListener('messageerror', workerMessageErrorHandlerRef.current)
+          }
+          workerRef.current.terminate()
+          workerRef.current = null
+          workerHandlerRef.current = null
+          workerErrorHandlerRef.current = null
+          workerMessageErrorHandlerRef.current = null
+        }
       }
     }
 
+    const handleWorkerError = (event) => {
+      if (transcriptionTimeoutRef.current) {
+        clearTimeout(transcriptionTimeoutRef.current)
+        transcriptionTimeoutRef.current = null
+      }
+      const msg = event?.message || 'Worker crashed during transcription.'
+      console.error('Whisper worker runtime error:', msg, event)
+      setIsTranscribing(false)
+      setTranscriptionStatus('')
+      if (workerRef.current) {
+        workerRef.current.terminate()
+        workerRef.current = null
+      }
+      workerHandlerRef.current = null
+      workerErrorHandlerRef.current = null
+      workerMessageErrorHandlerRef.current = null
+    }
+
+    const handleWorkerMessageError = (event) => {
+      if (transcriptionTimeoutRef.current) {
+        clearTimeout(transcriptionTimeoutRef.current)
+        transcriptionTimeoutRef.current = null
+      }
+      console.error('Whisper worker message parse error:', event)
+      setIsTranscribing(false)
+      setTranscriptionStatus('')
+      if (workerRef.current) {
+        workerRef.current.terminate()
+        workerRef.current = null
+      }
+      workerHandlerRef.current = null
+      workerErrorHandlerRef.current = null
+      workerMessageErrorHandlerRef.current = null
+    }
+
     worker.addEventListener('message', handleWorkerMessage)
+    worker.addEventListener('error', handleWorkerError)
+    worker.addEventListener('messageerror', handleWorkerMessageError)
     workerRef.current = worker
     workerHandlerRef.current = handleWorkerMessage
+    workerErrorHandlerRef.current = handleWorkerError
+    workerMessageErrorHandlerRef.current = handleWorkerMessageError
     return worker
   }, [])
 
@@ -449,6 +585,7 @@ export default function Chat({ isTemporary, setIsTemporary }) {
     setTimeout(async () => {
       if (audioChunksRef.current.length === 0) {
         setIsTranscribing(false)
+        setTranscriptionStatus('')
         return
       }
 
@@ -464,6 +601,14 @@ export default function Chat({ isTemporary, setIsTemporary }) {
         // Send to background worker
         const worker = ensureWhisperWorker()
         worker.postMessage({ audio: float32Data })
+        if (transcriptionTimeoutRef.current) {
+          clearTimeout(transcriptionTimeoutRef.current)
+        }
+        transcriptionTimeoutRef.current = setTimeout(() => {
+          console.error('Whisper transcription timed out waiting for worker response.')
+          setIsTranscribing(false)
+          setTranscriptionStatus('')
+        }, 60000)
 
       } catch (err) {
         console.error('Audio conversion error:', err)
@@ -480,6 +625,8 @@ export default function Chat({ isTemporary, setIsTemporary }) {
     }
     stopAudio()
     setIsListening(false)
+    setIsTranscribing(false)
+    setTranscriptionStatus('')
   }, [stopAudio])
 
   const startListening = useCallback(async () => {
@@ -525,9 +672,18 @@ export default function Chat({ isTemporary, setIsTemporary }) {
   useEffect(() => {
     return () => {
       if (mediaRecorderRef.current) mediaRecorderRef.current.stop()
+      if (transcriptionTimeoutRef.current) {
+        clearTimeout(transcriptionTimeoutRef.current)
+      }
       if (workerRef.current) {
         if (workerHandlerRef.current) {
           workerRef.current.removeEventListener('message', workerHandlerRef.current)
+        }
+        if (workerErrorHandlerRef.current) {
+          workerRef.current.removeEventListener('error', workerErrorHandlerRef.current)
+        }
+        if (workerMessageErrorHandlerRef.current) {
+          workerRef.current.removeEventListener('messageerror', workerMessageErrorHandlerRef.current)
         }
         workerRef.current.terminate()
       }
@@ -588,6 +744,63 @@ export default function Chat({ isTemporary, setIsTemporary }) {
   // turnVersions: Map<turnIndex, {versions: [{userContent, assistantContent}], currentIdx}>
   const [turnVersions, setTurnVersions] = useState(new Map())
   const [editingTurn, setEditingTurn] = useState(null) // { turnIndex, value }
+  const [speakingTurnIndex, setSpeakingTurnIndex] = useState(null)
+  const speakingTurnIndexRef = useRef(null)
+
+  useEffect(() => {
+    speakingTurnIndexRef.current = speakingTurnIndex
+  }, [speakingTurnIndex])
+
+  useEffect(() => {
+    return () => {
+      if (typeof window !== 'undefined' && window.speechSynthesis) {
+        window.speechSynthesis.cancel()
+      }
+    }
+  }, [])
+
+  const toReadableText = useCallback((text) => {
+    if (!text) return ''
+    return text
+      .replace(/```[\s\S]*?```/g, ' code block omitted. ')
+      .replace(/`([^`]+)`/g, '$1')
+      .replace(/\[(.*?)\]\((.*?)\)/g, '$1')
+      .replace(/[*_>#~-]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+  }, [])
+
+  const speakAssistantMessage = useCallback((turnIndex, rawText) => {
+    if (typeof window === 'undefined' || !window.speechSynthesis) {
+      return
+    }
+
+    const synth = window.speechSynthesis
+
+    if (speakingTurnIndexRef.current === turnIndex) {
+      synth.cancel()
+      setSpeakingTurnIndex(null)
+      return
+    }
+
+    const text = toReadableText(rawText)
+    if (!text) return
+
+    synth.cancel()
+
+    const utterance = new SpeechSynthesisUtterance(text)
+    utterance.rate = 1
+    utterance.pitch = 1
+    utterance.onend = () => {
+      setSpeakingTurnIndex((current) => (current === turnIndex ? null : current))
+    }
+    utterance.onerror = () => {
+      setSpeakingTurnIndex((current) => (current === turnIndex ? null : current))
+    }
+
+    setSpeakingTurnIndex(turnIndex)
+    synth.speak(utterance)
+  }, [toReadableText])
 
   // Broadcast active chat info to siblings (e.g. ChatArea header) via a window event.
   // This avoids IPC race conditions between siblings.
@@ -700,15 +913,15 @@ export default function Chat({ isTemporary, setIsTemporary }) {
     setValue('')
     setAttachments([])
     setAgentRoadmap(null)
+    setFollowUpSuggestions([])
     streamBufferRef.current = ''
   }, [])
 
   const loadChatSession = useCallback(async (chatId) => {
+    resetTransientState()
     if (!chatId || !window.scark?.chat?.get || chatId === 'temp') return
     const session = await window.scark.chat.get(chatId)
     if (!session) return
-
-    resetTransientState()
     if (isTemporary && setIsTemporary) setIsTemporary(false)
     setActiveChatId(session.id)
     setActiveChatTitle(session.title || 'New chat')
@@ -729,6 +942,7 @@ export default function Chat({ isTemporary, setIsTemporary }) {
       } catch (e) { }
     }
     setTurnVersions(loadedVersions)
+    setFollowUpSuggestions([])
     setEditingTurn(null)
   }, [resetTransientState])
 
@@ -807,6 +1021,39 @@ export default function Chat({ isTemporary, setIsTemporary }) {
       console.warn('[Chat] Summary update failed:', e?.message || e)
     }
   }, [chatSummary])
+
+  const generateFollowUps = useCallback(async (chatId, userText, assistantText) => {
+    if (!chatId || !assistantText || isTemporary || chatId === 'temp') return
+    try {
+      const raw = await webllmComplete([
+        {
+          role: 'system',
+          content:
+            'You are a helpful assistant that generates 3 concise, engaging follow-up questions for a chat conversation. ' +
+            'The questions should be relevant to the latest exchange and encourage further exploration. ' +
+            'Rules:\n' +
+            '- Maximum 6-8 words per question.\n' +
+            '- Be specific to the topic discussed.\n' +
+            '- Output each question on a new line, starting with a dash "- ".\n' +
+            '- Output ONLY the questions, nothing else.'
+        },
+        {
+          role: 'user',
+          content: `Latest user message: "${userText}"\nLatest assistant response: "${assistantText.slice(0, 500)}..."`
+        },
+      ], { maxTokens: 100, temperature: 0.7 })
+
+      const suggestions = (raw || '')
+        .split('\n')
+        .map(line => line.replace(/^- /, '').trim())
+        .filter(line => line.length > 0 && line.length < 100)
+        .slice(0, 3)
+
+      setFollowUpSuggestions(suggestions)
+    } catch (e) {
+      console.warn('[Chat] Follow-up generation failed:', e?.message || e)
+    }
+  }, [isTemporary])
 
   // IPC listeners – context status/errors and chat selection updates.
   useEffect(() => {
@@ -1001,6 +1248,7 @@ export default function Chat({ isTemporary, setIsTemporary }) {
     streamBufferRef.current = ''
     setStreamingReasoningPreview('')
     setSources([])
+    setFollowUpSuggestions([])
     initializeRoadmap(queryMode)
     adjustHeight(true)
 
@@ -1080,6 +1328,7 @@ export default function Chat({ isTemporary, setIsTemporary }) {
         }
 
         updateRollingSummary(chatId, queryText, finalText)
+        generateFollowUps(chatId, queryText, finalText)
       }
 
       if (result.sources?.length > 0) setSources(result.sources)
@@ -1103,11 +1352,12 @@ export default function Chat({ isTemporary, setIsTemporary }) {
     setIsTyping(false)
   }
 
-  const handleSendMessage = async () => {
-    if (!value.trim()) return
+  const handleSendMessage = async (overrideText) => {
+    const textToUse = typeof overrideText === 'string' ? overrideText : value
+    if (!textToUse.trim()) return
 
     let currentMode = mode
-    let query = value.trim()
+    let query = textToUse.trim()
 
     // Check for command prefix execution silently
     if (query.startsWith('/ask')) {
@@ -1125,14 +1375,19 @@ export default function Chat({ isTemporary, setIsTemporary }) {
     if (isTyping) {
       setQueuedMessage({ query, modeToUse: currentMode })
       setValue('')
+      setFollowUpSuggestions([])
       adjustHeight(true)
       return
     }
 
     // When sending a fresh message, seed a v1 for this turn (will be finalised after AI responds)
     setValue('')
+    setFollowUpSuggestions([])
     await executeSend(query, currentMode, messages)
   }
+
+  // Define a simple wrapper for the UI to use
+  const handleSendMessageOverride = (text) => handleSendMessage(text)
 
   // ── Edit a previous user message ────────────────────────────
   // Groups flat messages array into user+assistant pairs.
@@ -1253,8 +1508,24 @@ export default function Chat({ isTemporary, setIsTemporary }) {
     }
   }
 
+  const shouldShowStarryBg = messages.length === 0
+
   return (
-    <div className="flex flex-col w-full flex-1 min-h-0 bg-transparent text-foreground relative overflow-hidden rounded-xl">
+    <div className="flex flex-col w-full flex-1 min-h-0 bg-transparent dark:bg-black text-foreground relative overflow-hidden rounded-xl">
+      <AnimatePresence>
+        {shouldShowStarryBg && (
+          <motion.div
+            key="starry-backdrop"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.45, ease: 'easeInOut' }}
+            className="absolute inset-0 z-0"
+          >
+            <StarryIdleBackdrop />
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* Scrollable Messages Area */}
       <div
@@ -1270,7 +1541,10 @@ export default function Chat({ isTemporary, setIsTemporary }) {
           {messages.length === 0 && (
             <div className="flex-1 flex flex-col items-center justify-center space-y-4 pt-10">
               <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.2, duration: 0.5 }} className="inline-block text-center">
-                <AnimatedLogo mousePosition={mousePosition} />
+                <div className="flex items-center justify-center gap-3 mb-3">
+                  <AnimatedLogo mousePosition={mousePosition} className="mb-0 h-10" />
+                  <span className="text-2xl font-semibold tracking-[0.28em] text-black/70 dark:text-white/70">SCARK</span>
+                </div>
                 <h1 className="text-3xl font-medium tracking-tight bg-clip-text text-transparent bg-linear-to-r dark:from-white/90 dark:to-white/40 from-black/90 to-black/40 pb-1">
                   How can I help today?
                 </h1>
@@ -1295,6 +1569,9 @@ export default function Chat({ isTemporary, setIsTemporary }) {
               const versionCount = vEntry ? vEntry.versions.length : 1
               const currentVersionNum = vEntry ? vEntry.currentIdx + 1 : 1
               const isEditing = editingTurn?.turnIndex === turnIndex
+              const assistantTextForReadAloud = vEntry && vEntry.currentIdx < vEntry.versions.length - 1
+                ? displayAssistantContent
+                : (turn.assistantMsg?.content || '')
 
               return (
                 <React.Fragment key={turnIndex}>
@@ -1497,6 +1774,14 @@ export default function Chat({ isTemporary, setIsTemporary }) {
                         {turn.assistantMsg && (
                           <div className="flex items-center gap-1.5 mt-1 opacity-0 group-hover:opacity-100 transition-opacity duration-150">
                             <button
+                              title={speakingTurnIndex === turnIndex ? 'Stop reading aloud' : 'Read aloud'}
+                              aria-label={speakingTurnIndex === turnIndex ? 'Stop reading this response aloud' : 'Read this response aloud'}
+                              onClick={() => speakAssistantMessage(turnIndex, assistantTextForReadAloud)}
+                              className="p-1.5 rounded-lg text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 hover:bg-zinc-100 dark:hover:bg-white/10 transition-colors"
+                            >
+                              {speakingTurnIndex === turnIndex ? <VolumeX className="w-3.5 h-3.5" /> : <Volume2 className="w-3.5 h-3.5" />}
+                            </button>
+                            <button
                               title="Copy response"
                               onClick={() => window.scark?.utils?.copyToClipboard?.(turn.assistantMsg.content)}
                               className="p-1.5 rounded-lg text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 hover:bg-zinc-100 dark:hover:bg-white/10 transition-colors"
@@ -1512,6 +1797,26 @@ export default function Chat({ isTemporary, setIsTemporary }) {
               )
             })
           })()}
+
+          {/* Follow-up Suggestions Chips */}
+          {!isTyping && followUpSuggestions.length > 0 && (
+            <motion.div
+              initial={{ opacity: 0, y: 5 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="flex flex-wrap gap-2 justify-start mt-0.5 px-1 pb-4"
+            >
+              {followUpSuggestions.map((suggestion, idx) => (
+                <button
+                  key={idx}
+                  onClick={() => handleSendMessageOverride(suggestion)}
+                  className="px-4 py-2 rounded-full border border-black/10 dark:border-white/10 bg-black/5 dark:bg-white/5 hover:bg-black/10 dark:hover:bg-white/15 text-xs font-medium text-foreground/80 transition-all hover:scale-[1.02] active:scale-[0.98] flex items-center gap-2 group backdrop-blur-sm"
+                >
+                  <Sparkles className="w-3 h-3 text-violet-500 opacity-70 group-hover:opacity-100" />
+                  {suggestion}
+                </button>
+              ))}
+            </motion.div>
+          )}
 
           {/* LLM Thinking/Streaming State in the Main Chat Area (Like Claude/GPT) */}
           {isTyping && (
@@ -1692,9 +1997,10 @@ export default function Chat({ isTemporary, setIsTemporary }) {
 
         <motion.div
           className={cn(
-            "relative backdrop-blur-2xl dark:bg-white/2 bg-black/2 rounded-2xl border shadow-2xl transition-colors",
-            dragActive ? "dark:border-white/30 border-black/30 dark:bg-white/5 bg-black/5" : "dark:border-white/5 border-black/5"
+            "relative backdrop-blur-2xl dark:bg-white/[0.03] bg-black/2 rounded-2xl border transition-colors",
+            dragActive ? "dark:border-white/30 border-black/30 dark:bg-white/[0.05] bg-black/5" : "dark:border-white/10 border-black/5"
           )}
+          style={{ boxShadow: '0 0 40px -10px rgba(0,0,0,0.5)' }}
           initial={{ scale: 0.98 }}
           animate={{ scale: 1 }}
           onDragEnter={handleDrag}
@@ -1768,7 +2074,10 @@ export default function Chat({ isTemporary, setIsTemporary }) {
               <Textarea
                 ref={textareaRef}
                 value={value}
-                onChange={e => { setValue(e.target.value); adjustHeight() }}
+                onChange={e => {
+                  setValue(e.target.value)
+                  adjustHeight()
+                }}
                 onKeyDown={handleKeyDown}
                 onPaste={handlePaste}
                 onFocus={() => setInputFocused(true)}

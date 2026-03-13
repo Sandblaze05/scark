@@ -85,7 +85,7 @@ export default function Settings({ onClose, onProfileSaved }) {
       onClick={e => { if (e.target === e.currentTarget) onClose() }}
     >
       {/* Fixed-size modal — same height for all tabs */}
-      <div className="relative flex rounded-2xl overflow-hidden shadow-2xl bg-white dark:bg-[#1e1e1e] border border-zinc-200 dark:border-white/10"
+      <div className="relative flex rounded-2xl overflow-hidden shadow-2xl bg-white dark:bg-zinc-950 border border-zinc-200 dark:border-white/10"
         style={{ width: 840, height: 540 }}>
 
         {/* Close */}
@@ -97,7 +97,7 @@ export default function Settings({ onClose, onProfileSaved }) {
         </button>
 
         {/* ── Left sidebar ── */}
-        <div className="w-52 shrink-0 bg-zinc-50 dark:bg-[#171717] border-r border-zinc-200 dark:border-white/10 flex flex-col py-6 px-3">
+        <div className="w-52 shrink-0 bg-zinc-50 dark:bg-background border-r border-zinc-200 dark:border-white/10 flex flex-col py-6 px-3">
           <h2 className="text-lg font-semibold text-gray-900 dark:text-white px-3 mb-5">Settings</h2>
           <nav className="flex flex-col gap-0.5 flex-1">
             {NAV_ITEMS.map(({ id, label, icon: Icon }) => (
@@ -138,7 +138,7 @@ export default function Settings({ onClose, onProfileSaved }) {
                         value={profile.fullName}
                         onChange={e => setProfile(p => ({ ...p, fullName: e.target.value }))}
                         placeholder="Your full name"
-                        className="flex-1 bg-zinc-100 dark:bg-[#2a2a2a] border border-zinc-200 dark:border-white/10 rounded-lg px-3 py-2 text-sm text-gray-900 dark:text-white outline-none focus:ring-2 focus:ring-violet-500/40 transition-all"
+                        className="flex-1 bg-zinc-100 dark:bg-white/5 border border-zinc-200 dark:border-white/10 rounded-lg px-3 py-2 text-sm text-gray-900 dark:text-white outline-none focus:ring-2 focus:ring-violet-500/40 transition-all"
                       />
                     </div>
                   </div>
@@ -149,7 +149,7 @@ export default function Settings({ onClose, onProfileSaved }) {
                       value={profile.displayName}
                       onChange={e => setProfile(p => ({ ...p, displayName: e.target.value }))}
                       placeholder="Display name"
-                      className="w-full bg-zinc-100 dark:bg-[#2a2a2a] border border-zinc-200 dark:border-white/10 rounded-lg px-3 py-2 text-sm text-gray-900 dark:text-white outline-none focus:ring-2 focus:ring-violet-500/40 transition-all"
+                      className="w-full bg-zinc-100 dark:bg-white/5 border border-zinc-200 dark:border-white/10 rounded-lg px-3 py-2 text-sm text-gray-900 dark:text-white outline-none focus:ring-2 focus:ring-violet-500/40 transition-all"
                     />
                   </div>
                 </div>
@@ -160,7 +160,7 @@ export default function Settings({ onClose, onProfileSaved }) {
                   <select
                     value={profile.workFunction}
                     onChange={e => setProfile(p => ({ ...p, workFunction: e.target.value }))}
-                    className="w-full appearance-none bg-zinc-100 dark:bg-[#2a2a2a] border border-zinc-200 dark:border-white/10 rounded-lg px-3 py-2.5 text-sm text-gray-900 dark:text-white outline-none focus:ring-2 focus:ring-violet-500/40 transition-all cursor-pointer"
+                    className="w-full appearance-none bg-zinc-100 dark:bg-white/5 border border-zinc-200 dark:border-white/10 rounded-lg px-3 py-2.5 text-sm text-gray-900 dark:text-white outline-none focus:ring-2 focus:ring-violet-500/40 transition-all cursor-pointer"
                   >
                     <option value="">Select your work function</option>
                     {WORK_FUNCTIONS.filter(Boolean).map(f => (
@@ -182,7 +182,7 @@ export default function Settings({ onClose, onProfileSaved }) {
                     onChange={e => setProfile(p => ({ ...p, preferences: e.target.value }))}
                     placeholder="e.g. ask clarifying questions before giving detailed answers"
                     rows={4}
-                    className="w-full bg-zinc-100 dark:bg-[#2a2a2a] border border-zinc-200 dark:border-white/10 rounded-lg px-3 py-2.5 text-sm text-gray-900 dark:text-white outline-none focus:ring-2 focus:ring-violet-500/40 transition-all resize-none placeholder-gray-400 dark:placeholder-gray-600"
+                    className="w-full bg-zinc-100 dark:bg-white/5 border border-zinc-200 dark:border-white/10 rounded-lg px-3 py-2.5 text-sm text-gray-900 dark:text-white outline-none focus:ring-2 focus:ring-violet-500/40 transition-all resize-none placeholder-gray-400 dark:placeholder-gray-600"
                   />
                 </div>
               </div>

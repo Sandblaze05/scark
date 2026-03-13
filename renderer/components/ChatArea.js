@@ -84,7 +84,7 @@ const ChatArea = () => {
       <header className='flex items-center justify-between w-full px-5 py-2 min-h-[52px]'>
         <div className="flex-1">
           {isTemporary ? (
-            <div className="flex items-center gap-2 text-sm font-medium px-4 py-2 rounded-full shadow-sm max-w-xs bg-white dark:bg-[#2f2f2f] text-gray-800 dark:text-white border border-zinc-300 dark:border-white/10 italic">
+            <div className="flex items-center gap-2 text-sm font-medium px-4 py-2 rounded-full shadow-sm max-w-xs bg-white dark:bg-white/5 text-gray-800 dark:text-white border border-zinc-300 dark:border-white/10 italic backdrop-blur-md">
               <Ghost size={14} className="shrink-0 text-violet-500" />
               <span>Temporary Chat</span>
             </div>
@@ -99,11 +99,11 @@ const ChatArea = () => {
                 onBlur={handleSaveTitle}
                 onKeyDown={handleTitleKeyDown}
                 className="
-                  bg-zinc-100 dark:bg-[#2f2f2f]
+                  bg-zinc-100 dark:bg-white/10
                   text-gray-900 dark:text-white
                   text-sm font-medium px-4 py-2 rounded-full outline-none w-72
                   ring-2 ring-violet-500/40
-                  border border-zinc-300 dark:border-transparent
+                  border border-zinc-300 dark:border-white/10
                 "
               />
             ) : (
@@ -112,10 +112,10 @@ const ChatArea = () => {
                 className="
                   flex items-center gap-2 text-sm font-medium px-4 py-2 rounded-full
                   transition-colors max-w-xs shadow-sm
-                  bg-white dark:bg-[#2f2f2f]
+                  bg-white dark:bg-white/5
                   text-gray-800 dark:text-white
                   border border-zinc-300 dark:border-white/10
-                  hover:bg-zinc-100 dark:hover:bg-[#3a3a3a]
+                  hover:bg-zinc-100 dark:hover:bg-white/10 backdrop-blur-md
                 "
               >
                 {chatInfo.isPinned && <Pin size={12} className="shrink-0 opacity-50" />}
@@ -125,7 +125,7 @@ const ChatArea = () => {
             )}
 
             {showDropdown && (
-              <div className="absolute top-full left-0 mt-2 w-52 bg-white dark:bg-[#2f2f2f] border border-zinc-200 dark:border-white/10 rounded-xl shadow-2xl py-1.5 z-50">
+              <div className="absolute top-full left-0 mt-2 w-52 bg-white dark:bg-zinc-900/90 border border-zinc-200 dark:border-white/10 rounded-xl shadow-2xl py-1.5 z-50 backdrop-blur-xl">
                 <button
                   className="w-full text-left px-4 py-2.5 text-sm flex items-center gap-3 hover:bg-zinc-100 dark:hover:bg-[#3a3a3a] transition-colors text-gray-700 dark:text-gray-200"
                   onClick={handlePin}
@@ -158,7 +158,7 @@ const ChatArea = () => {
           <div className="flex items-center gap-2 ml-4">
             <button
               onClick={() => setIsTemporary(!isTemporary)}
-              className={`p-2 rounded-xl transition-all ${
+              className={`flex items-center gap-2 px-3 py-1.5 rounded-xl transition-all ${
                 isTemporary 
                   ? 'bg-violet-100 text-violet-600 dark:bg-violet-500/20 dark:text-violet-400 ring-2 ring-violet-500/40 shadow-sm' 
                   : 'text-gray-500 hover:bg-zinc-200 dark:hover:bg-white/10 dark:text-gray-400 hover:text-black dark:hover:text-white'
@@ -166,6 +166,7 @@ const ChatArea = () => {
               title="Temporary Chat (No history saved)"
             >
               <Ghost size={18} />
+              <span className="text-xs font-semibold uppercase tracking-wider">Temporary</span>
             </button>
           </div>
         )}

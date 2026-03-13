@@ -19,10 +19,11 @@
 }
 
 .dark {
-    --background: #212121;
+    --background: #000000;
     --foreground: #ffffff;
 }
 
+html,
 body {
     background-color: var(--background);
     color: var(--foreground);
@@ -52,3 +53,56 @@ body {
     scrollbar-width: thin;
     scrollbar-color: rgba(255, 255, 255, 0.1) transparent;
 }
+
+.starfield-aurora-layer {
+    position: absolute;
+    inset: -20%;
+    background: none;
+    filter: none;
+    opacity: 0;
+}
+
+.starfield-star {
+    position: absolute;
+    left: var(--star-left);
+    bottom: var(--star-bottom);
+    width: var(--star-size);
+    height: var(--star-size);
+    border-radius: 999px;
+    background: rgba(0, 0, 0, 0.72);
+    box-shadow: 0 0 8px rgba(0, 0, 0, 0.18);
+    opacity: 0;
+    filter: blur(var(--star-blur));
+    animation: starfield-arc var(--star-dur) linear infinite;
+    animation-delay: var(--star-delay);
+}
+
+.starfield-vignette {
+    position: absolute;
+    inset: 0;
+    background: none;
+}
+
+.dark .starfield-star {
+    background: rgba(240, 248, 255, 0.95);
+    box-shadow: 0 0 12px rgba(226, 244, 255, 0.9);
+}
+
+@keyframes starfield-arc {
+    0% {
+        transform: translate3d(0, 0, 0) scale(0.7);
+        opacity: 0;
+    }
+    12% {
+        opacity: var(--star-alpha);
+    }
+    55% {
+        transform: translate3d(42vw, -52vh, 0) scale(1);
+        opacity: var(--star-alpha);
+    }
+    100% {
+        transform: translate3d(94vw, -30vh, 0) scale(0.85);
+        opacity: 0;
+    }
+}
+

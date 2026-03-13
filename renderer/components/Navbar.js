@@ -140,27 +140,48 @@ const Navbar = () => {
 
   return (
     <>
-    <div className={`flex flex-col whitespace-nowrap h-screen bg-zinc-50 dark:bg-[#171717] border-r border-zinc-200 dark:border-transparent text-gray-800 dark:text-gray-200 transition-all duration-300 shrink-0 ${isCollapsed ? 'w-17.5' : 'w-65'} pt-2`}>
-      <div className="flex items-center justify-between px-3 h-12 shrink-0">
-        <div className={`flex items-center gap-2 overflow-hidden transition-all duration-300 ${isCollapsed ? 'w-0 opacity-0' : 'w-auto opacity-100'}`}>
-          {/* Logo + SCARK text – larger size */}
-          <div className="w-8 h-8 flex items-center justify-center shrink-0">
-            <svg viewBox="0 0 24 24" fill="currentColor" className="w-6 h-6 text-black dark:text-white" xmlns="http://www.w3.org/2000/svg">
-              <path d="M22.2819 9.8211a5.9847 5.9847 0 0 0-.5157-4.9108 6.0462 6.0462 0 0 0-6.5098-2.9A6.0651 6.0651 0 0 0 4.9807 4.1818a5.9847 5.9847 0 0 0-3.9977 2.9 6.0462 6.0462 0 0 0 .7427 7.0966 5.98 5.98 0 0 0 .511 4.9107 6.051 6.051 0 0 0 6.5146 2.9001A5.9847 5.9847 0 0 0 13.2599 24a6.0557 6.0557 0 0 0 5.7718-4.2057 5.9847 5.9847 0 0 0 3.989-2.9 6.051 6.051 0 0 0-.7388-7.0732z" />
-              <circle cx="9.5" cy="10" r="1.5" fill="white" className="dark:fill-black" />
-              <circle cx="14.5" cy="10" r="1.5" fill="white" className="dark:fill-black" />
-            </svg>
-          </div>
-          <span className="text-sm font-bold tracking-widest text-gray-600 dark:text-gray-300">SCARK</span>
-        </div>
+    <div className={`flex flex-col whitespace-nowrap h-screen bg-zinc-50 dark:bg-black border-r border-zinc-200 dark:border-white/5 text-gray-800 dark:text-gray-200 transition-all duration-300 shrink-0 ${isCollapsed ? 'w-17.5' : 'w-65'} pt-2`}>
+      <div className="px-3 h-12 shrink-0">
+        {!isCollapsed ? (
+          <div className="flex items-center justify-between h-full">
+            <div className="flex items-center gap-2 overflow-hidden transition-all duration-300 w-auto opacity-100">
+              <div className="w-8 h-8 flex items-center justify-center shrink-0">
+                <svg viewBox="0 0 24 24" fill="currentColor" className="w-6 h-6 text-black dark:text-white" xmlns="http://www.w3.org/2000/svg">
+                  <path d="M22.2819 9.8211a5.9847 5.9847 0 0 0-.5157-4.9108 6.0462 6.0462 0 0 0-6.5098-2.9A6.0651 6.0651 0 0 0 4.9807 4.1818a5.9847 5.9847 0 0 0-3.9977 2.9 6.0462 6.0462 0 0 0 .7427 7.0966 5.98 5.98 0 0 0 .511 4.9107 6.051 6.051 0 0 0 6.5146 2.9001A5.9847 5.9847 0 0 0 13.2599 24a6.0557 6.0557 0 0 0 5.7718-4.2057 5.9847 5.9847 0 0 0 3.989-2.9 6.051 6.051 0 0 0-.7388-7.0732z" />
+                  <circle cx="9.5" cy="10" r="1.5" fill="white" className="dark:fill-black" />
+                  <circle cx="14.5" cy="10" r="1.5" fill="white" className="dark:fill-black" />
+                </svg>
+              </div>
+              <span className="text-sm font-bold tracking-widest text-gray-600 dark:text-gray-300">SCARK</span>
+            </div>
 
-        <button
-          onClick={() => setIsCollapsed(!isCollapsed)}
-          className={`p-2 hover:bg-zinc-200 dark:hover:bg-[#202123] rounded-md transition-colors text-gray-500 dark:text-gray-400 hover:text-black dark:hover:text-white shrink-0 ${isCollapsed ? 'mx-auto' : ''}`}
-          title={isCollapsed ? 'Expand sidebar' : 'Close sidebar'}
-        >
-          {isCollapsed ? <PanelLeftOpen size={20} /> : <PanelLeftClose size={20} />}
-        </button>
+            <button
+              onClick={() => setIsCollapsed(true)}
+              className="p-2 hover:bg-zinc-200 dark:hover:bg-[#202123] rounded-md transition-colors text-gray-500 dark:text-gray-400 hover:text-black dark:hover:text-white shrink-0"
+              title="Close sidebar"
+            >
+              <PanelLeftClose size={20} />
+            </button>
+          </div>
+        ) : (
+          <div className="relative h-full w-full flex items-center justify-center group/sidebar-brand">
+            <div className="w-8 h-8 flex items-center justify-center text-black dark:text-white transition-opacity duration-150 group-hover/sidebar-brand:opacity-0">
+              <svg viewBox="0 0 24 24" fill="currentColor" className="w-6 h-6" xmlns="http://www.w3.org/2000/svg">
+                <path d="M22.2819 9.8211a5.9847 5.9847 0 0 0-.5157-4.9108 6.0462 6.0462 0 0 0-6.5098-2.9A6.0651 6.0651 0 0 0 4.9807 4.1818a5.9847 5.9847 0 0 0-3.9977 2.9 6.0462 6.0462 0 0 0 .7427 7.0966 5.98 5.98 0 0 0 .511 4.9107 6.051 6.051 0 0 0 6.5146 2.9001A5.9847 5.9847 0 0 0 13.2599 24a6.0557 6.0557 0 0 0 5.7718-4.2057 5.9847 5.9847 0 0 0 3.989-2.9 6.051 6.051 0 0 0-.7388-7.0732z" />
+                <circle cx="9.5" cy="10" r="1.5" fill="white" className="dark:fill-black" />
+                <circle cx="14.5" cy="10" r="1.5" fill="white" className="dark:fill-black" />
+              </svg>
+            </div>
+
+            <button
+              onClick={() => setIsCollapsed(false)}
+              className="absolute inset-0 m-auto w-8 h-8 flex items-center justify-center rounded-md opacity-0 group-hover/sidebar-brand:opacity-100 bg-zinc-200 dark:bg-[#202123] text-gray-700 dark:text-gray-300 hover:text-black dark:hover:text-white transition-all duration-150"
+              title="Expand sidebar"
+            >
+              <PanelLeftOpen size={16} />
+            </button>
+          </div>
+        )}
       </div>
 
       <div className="flex-1 overflow-y-auto overflow-x-hidden pt-2 scrollbar-thin scrollbar-thumb-zinc-300 dark:scrollbar-thumb-gray-600 scrollbar-track-transparent">

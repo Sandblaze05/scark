@@ -1,26 +1,49 @@
-// Webpack 5 does not polyfill 'process' in web workers, which causes
-// @xenova/transformers/src/env.js to throw a TypeError when it calls Object.keys()
-// on process.versions. We must safely polyfill it BEFORE importing.
-if (typeof process === 'undefined') {
-    self.process = { versions: {}, env: {} };
-} else {
-    if (!process.versions || typeof process.versions !== 'object') {
-        process.versions = {};
+// Polyfill process/global BEFORE importing @xenova/transformers.
+// Static imports are hoisted in ES modules, so dynamic import() is required.
+const g = globalThis;
+
+function ensureProcessPolyfills() {
+    try {
+        if (!g.process || typeof g.process !== 'object') {
+            g.process = {};
+        }
+        if (!g.process.versions || typeof g.process.versions !== 'object') {
+            g.process.versions = {};
+        }
+        if (!g.process.env || typeof g.process.env !== 'object') {
+            g.process.env = {};
+        }
+        if (!g.process.release || typeof g.process.release !== 'object') {
+            g.process.release = { name: 'browser' };
+        }
+    } catch {
+        // Best-effort only; worker continues and reports detailed init errors.
     }
-    if (!process.env || typeof process.env !== 'object') {
-        process.env = {};
+
+    try {
+        if (!g.global) {
+            g.global = g;
+        }
+    } catch {
+        // ignore
     }
 }
-if (typeof global === 'undefined') {
-    self.global = self;
+
+ensureProcessPolyfills();
+
+let transformersModule = null;
+
+async function getTransformers() {
+    if (!transformersModule) {
+        ensureProcessPolyfills();
+        transformersModule = await import('@xenova/transformers');
+        if (transformersModule?.env) {
+            transformersModule.env.allowLocalModels = false;
+            transformersModule.env.useBrowserCache = true;
+        }
+    }
+    return transformersModule;
 }
-
-import { pipeline, env } from '@xenova/transformers';
-
-// Disable local models directory since we are letting transformers download directly to cache from HF Hub
-env.allowLocalModels = false;
-// Useful for electron to use fetch properly
-env.useBrowserCache = true;
 
 class PipelineFactory {
     static task = 'automatic-speech-recognition';
@@ -29,9 +52,10 @@ class PipelineFactory {
 
     static async getInstance(progress_callback = null) {
         if (this.instance === null) {
+            const { pipeline } = await getTransformers();
             this.instance = await pipeline(this.task, this.model, {
                 progress_callback,
-                revision: 'main'
+                revision: 'main',
             });
         }
         return this.instance;
@@ -40,31 +64,41 @@ class PipelineFactory {
 
 // Listen for messages from the main thread
 self.addEventListener('message', async (event) => {
-    // We only expect one type of message: { audio: Float32Array }
-    const { audio } = event.data;
-
     try {
-        // Retrieve the ASR pipeline
+        const payload = (event && typeof event.data === 'object' && event.data !== null) ? event.data : {};
+        const audio = payload.audio;
+        if (!audio || typeof audio.length !== 'number') {
+            throw new Error('Invalid audio payload received by whisper worker.');
+        }
+        console.log('[Worker] Received audio data, length:', audio.length);
+
         const transcriber = await PipelineFactory.getInstance(data => {
-            // Optional: send download progress back to the main thread
             self.postMessage({ status: 'progress', data });
         });
 
+        console.log('[Worker] Pipeline ready, starting transcription...');
         self.postMessage({ status: 'decoding' });
 
-        // Run the audio through the model
         const result = await transcriber(audio, {
-            chunk_length_s: 30, // Max audio chunk size Whisper can process
+            chunk_length_s: 30,
             stride_length_s: 5,
         });
 
-        // Send the result back
+        console.log('[Worker] Transcription complete:', result.text);
         self.postMessage({
             status: 'complete',
             text: result.text
         });
 
     } catch (err) {
-        self.postMessage({ status: 'error', error: err.message });
+        console.error('[Worker] Error:', err);
+        self.postMessage({
+            status: 'error',
+            error: {
+                message: err?.message || String(err),
+                stack: err?.stack || null,
+                name: err?.name || null,
+            }
+        });
     }
 });
