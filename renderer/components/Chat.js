@@ -21,7 +21,16 @@ import {
   Mic,
   Globe,
   Volume2,
-  VolumeX
+  VolumeX,
+  RefreshCw,
+  ChevronDown,
+  Lock,
+  ArrowRight,
+  Zap,
+  Cpu,
+  MessagesSquare,
+  Bot,
+  Sun
 } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { cn } from '../lib/utils'
@@ -389,6 +398,29 @@ export default function Chat({ isTemporary, setIsTemporary }) {
   const [modelLoading, setModelLoading] = useState(true)
   const [modelProgress, setModelProgress] = useState('')
   const [modelProgressPercent, setModelProgressPercent] = useState(0)
+
+  const [selectedModel, setSelectedModel] = useState({ id: 'sonar', name: 'Sonar', icon: Zap })
+  const [showModelMenu, setShowModelMenu] = useState(false)
+  const modelMenuRef = useRef(null)
+
+  const models = [
+    { id: 'sonar', name: 'Sonar', icon: Zap, color: 'text-violet-400' },
+    { id: 'gpt-5.4', name: 'GPT-5.4', icon: MessagesSquare, color: 'text-emerald-400' },
+    { id: 'gemini-3.1-pro', name: 'Gemini 3.1 Pro', icon: Sparkles, color: 'text-blue-400' },
+    { id: 'claude-sonnet-4.6', name: 'Claude Sonnet 4.6', icon: Sun, color: 'text-orange-400' },
+    { id: 'claude-opus-4.6', name: 'Claude Opus 4.6', icon: Sun, color: 'text-orange-500' },
+    { id: 'nemotron-3-super', name: 'Nemotron 3 Super', icon: Cpu, color: 'text-green-400' },
+  ]
+
+  useEffect(() => {
+    const handleClickOutside = (event) => {
+      if (modelMenuRef.current && !modelMenuRef.current.contains(event.target)) {
+        setShowModelMenu(false)
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside)
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [])
 
   const ensureWhisperWorker = useCallback(() => {
     if (workerRef.current) return workerRef.current
@@ -1468,6 +1500,31 @@ export default function Chat({ isTemporary, setIsTemporary }) {
     })
   }, [])
 
+  const handleRegenerate = useCallback(async (turnIndex, turns) => {
+    if (isTyping) return
+    const turn = turns[turnIndex]
+    const userText = turn.userMsg.content
+
+    setTurnVersions(prev => {
+      const next = new Map(prev)
+      const existing = next.get(turnIndex) ?? {
+        versions: [{ userContent: userText, assistantContent: turn.assistantMsg?.content ?? '' }],
+        currentIdx: 0,
+      }
+      const newVersion = { userContent: userText, assistantContent: '' }
+      return next.set(turnIndex, {
+        versions: [...existing.versions, newVersion],
+        currentIdx: existing.versions.length
+      })
+    })
+
+    const msgsUpToTurn = messages.slice(0, turn.startIndex)
+    if (activeChatId && !isTemporary && activeChatId !== 'temp') {
+      await window.scark?.chat?.truncate?.(activeChatId, turn.startIndex)
+    }
+    await executeSend(userText, mode, msgsUpToTurn)
+  }, [isTyping, messages, mode, executeSend, activeChatId, isTemporary])
+
   const handleStopResponse = async () => {
     if (webllmAbortRef.current) {
       webllmAbortRef.current.abort()
@@ -1780,6 +1837,13 @@ export default function Chat({ isTemporary, setIsTemporary }) {
                               className="p-1.5 rounded-lg text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 hover:bg-zinc-100 dark:hover:bg-white/10 transition-colors"
                             >
                               {speakingTurnIndex === turnIndex ? <VolumeX className="w-3.5 h-3.5" /> : <Volume2 className="w-3.5 h-3.5" />}
+                            </button>
+                            <button
+                              title="Regenerate response"
+                              onClick={() => handleRegenerate(turnIndex, groupedTurns)}
+                              className="p-1.5 rounded-lg text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 hover:bg-zinc-100 dark:hover:bg-white/10 transition-colors"
+                            >
+                              <RefreshCw className="w-3.5 h-3.5" />
                             </button>
                             <button
                               title="Copy response"
@@ -2157,7 +2221,50 @@ export default function Chat({ isTemporary, setIsTemporary }) {
               </div>
             </div>
 
-            <div className="flex items-center gap-2 relative">
+            <div className="flex items-center gap-2 relative" ref={modelMenuRef}>
+              <AnimatePresence>
+                {showModelMenu && (
+                  <motion.div
+                    initial={{ opacity: 0, y: 10, scale: 0.95 }}
+                    animate={{ opacity: 1, y: 0, scale: 1 }}
+                    exit={{ opacity: 0, y: 10, scale: 0.95 }}
+                    transition={{ duration: 0.15, ease: "easeOut" }}
+                    className="absolute bottom-full right-0 mb-3 w-64 bg-black border border-white/10 rounded-2xl shadow-2xl overflow-hidden z-50 p-1"
+                  >
+                    <div className="p-1 space-y-0.5">
+                      {models.map((m) => (
+                        <button
+                          key={m.id}
+                          onClick={() => {
+                            setSelectedModel(m)
+                            setShowModelMenu(false)
+                          }}
+                          className={cn(
+                            "w-full flex items-center justify-between px-3 py-2.5 rounded-xl transition-all duration-200 group/item",
+                            selectedModel.id === m.id ? "bg-white/10" : "hover:bg-white/5"
+                          )}
+                        >
+                          <div className="flex items-center gap-3">
+                            <m.icon className={cn("w-4 h-4", m.color || "text-white/60")} />
+                            <span className={cn("text-xs font-medium transition-colors", selectedModel.id === m.id ? "text-white" : "text-white/60 group-hover/item:text-white/90")}>
+                              {m.name}
+                            </span>
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+
+              <button
+                onClick={() => setShowModelMenu(!showModelMenu)}
+                className="h-8.5 px-3.5 flex items-center gap-2 rounded-full text-xs font-semibold bg-white/5 hover:bg-white/10 border border-white/10 transition-all text-white/90 shadow-sm"
+              >
+                <span>{selectedModel.name}</span>
+                <ChevronDown className={cn("w-3.5 h-3.5 opacity-60 transition-transform duration-300", showModelMenu ? "rotate-180" : "")} />
+              </button>
+
               <AnimatePresence mode="wait">
                 {isTyping && !value.trim() ? (
                   <motion.button
