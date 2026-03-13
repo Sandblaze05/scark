@@ -1,6 +1,8 @@
 'use client'
+
 import React, { useState, useEffect, useCallback } from 'react'
 import { X, User, Bell, Shield } from 'lucide-react'
+import { motion } from 'framer-motion'
 
 const WORK_FUNCTIONS = [
   '',
@@ -80,13 +82,21 @@ export default function Settings({ onClose, onProfileSaved }) {
     : 'SR'
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm"
+    <motion.div
+      initial={{ backdropFilter: 'blur(0px)', backgroundColor: 'color-mix(in oklab, var(--color-black) 0%, transparent)' }}
+      animate={{ backdropFilter: 'blur(8px)', backgroundColor: 'color-mix(in oklab, var(--color-black) 40%, transparent)' }}
+      exit={{ backdropFilter: 'blur(0px)', backgroundColor: 'color-mix(in oklab, var(--color-black) 0%, transparent)' }}
+      className="fixed inset-0 z-50 flex items-center justify-center"
       onClick={e => { if (e.target === e.currentTarget) onClose() }}
     >
       {/* Fixed-size modal — same height for all tabs */}
-      <div className="relative flex rounded-2xl overflow-hidden shadow-2xl bg-white dark:bg-zinc-950 border border-zinc-200 dark:border-white/10"
-        style={{ width: 840, height: 540 }}>
+      <motion.div
+        initial={{ scale: '90%', opacity: 0 }}
+        animate={{ scale: '100%', opacity: 1 }}
+        exit={{ scale: '90%', opacity: 0 }}
+        className="relative flex rounded-2xl overflow-hidden shadow-2xl bg-white dark:bg-zinc-950 border border-zinc-200 dark:border-white/10"
+        style={{ width: 840, height: 540 }}
+      >
 
         {/* Close */}
         <button
@@ -162,9 +172,9 @@ export default function Settings({ onClose, onProfileSaved }) {
                     onChange={e => setProfile(p => ({ ...p, workFunction: e.target.value }))}
                     className="w-full appearance-none bg-zinc-100 dark:bg-white/5 border border-zinc-200 dark:border-white/10 rounded-lg px-3 py-2.5 text-sm text-gray-900 dark:text-white outline-none focus:ring-2 focus:ring-violet-500/40 transition-all cursor-pointer"
                   >
-                    <option value="">Select your work function</option>
+                    <option value="" className='text-black'>Select your work function</option>
                     {WORK_FUNCTIONS.filter(Boolean).map(f => (
-                      <option key={f} value={f}>{f}</option>
+                      <option key={f} value={f} className='text-black'>{f}</option>
                     ))}
                   </select>
                 </div>
@@ -258,7 +268,7 @@ export default function Settings({ onClose, onProfileSaved }) {
             </button>
           </div>
         </div>
-      </div>
-    </div>
+      </motion.div>
+    </motion.div>
   )
 }
