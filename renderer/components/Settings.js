@@ -24,7 +24,7 @@ const NAV_ITEMS = [
 
 export default function Settings({ onClose, onProfileSaved }) {
   const [activeTab, setActiveTab] = useState('general')
-  const BLANK = { fullName: '', displayName: '', workFunction: '', preferences: '', notifyOnComplete: false }
+  const BLANK = { fullName: '', displayName: '', workFunction: '', preferences: '', notifyOnComplete: false, selectedVoice: '' }
   const [profile, setProfile] = useState(BLANK)
   const [savedProfile, setSavedProfile] = useState(BLANK) // tracks last-saved snapshot
   const [saving, setSaving] = useState(false)
@@ -42,6 +42,7 @@ export default function Settings({ onClose, onProfileSaved }) {
             workFunction: data.workFunction || '',
             preferences: data.preferences || '',
             notifyOnComplete: data.notifyOnComplete === 'true',
+            selectedVoice: data.selectedVoice || '',
           }
           setProfile(loaded)
           setSavedProfile(loaded)
@@ -51,6 +52,20 @@ export default function Settings({ onClose, onProfileSaved }) {
       }
     }
     load()
+  }, [])
+
+  const [availableVoices, setAvailableVoices] = useState([])
+
+  useEffect(() => {
+    const loadVoices = () => {
+      const voices = window.speechSynthesis.getVoices()
+      if (voices.length > 0) {
+        setAvailableVoices(voices)
+      }
+    }
+    loadVoices()
+    window.speechSynthesis.onvoiceschanged = loadVoices
+    return () => { window.speechSynthesis.onvoiceschanged = null }
   }, [])
 
   const isDirty = JSON.stringify(profile) !== JSON.stringify(savedProfile)
@@ -64,10 +79,15 @@ export default function Settings({ onClose, onProfileSaved }) {
         workFunction: profile.workFunction,
         preferences: profile.preferences,
         notifyOnComplete: String(profile.notifyOnComplete),
+        selectedVoice: profile.selectedVoice,
       })
       setSavedProfile({ ...profile })
       setSaveSuccess(true)
       setTimeout(() => setSaveSuccess(false), 2000)
+      
+      // Dispatch event for other components (like Chat) to refresh profile data
+      window.dispatchEvent(new CustomEvent('scark:profileSaved', { detail: profile }))
+
       // Notify parent so Navbar can update the displayed name
       onProfileSaved?.({ ...profile })
     } catch (e) {
@@ -218,6 +238,35 @@ export default function Settings({ onClose, onProfileSaved }) {
                     >
                       <span className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full shadow transition-transform duration-200 ${profile.notifyOnComplete ? 'translate-x-5' : 'translate-x-0'}`} />
                     </button>
+                  </div>
+                </div>
+
+                <div className="border-t border-zinc-200 dark:border-white/10 pt-5 mt-5">
+                  <div className="space-y-4">
+                    <div>
+                      <p className="text-sm font-medium text-gray-800 dark:text-gray-200">Voice selection</p>
+                      <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5 mb-3">
+                        Choose the voice used for reading assistant messages aloud.
+                      </p>
+                    </div>
+                    
+                    <div className="relative">
+                      <select
+                        value={profile.selectedVoice}
+                        onChange={e => setProfile(p => ({ ...p, selectedVoice: e.target.value }))}
+                        className="w-full appearance-none bg-zinc-100 dark:bg-white/5 border border-zinc-200 dark:border-white/10 rounded-lg px-3 py-2.5 text-sm text-gray-900 dark:text-white outline-none focus:ring-2 focus:ring-violet-500/40 transition-all cursor-pointer"
+                      >
+                        <option value="" className="text-black">Default System Voice</option>
+                        {availableVoices.map(voice => (
+                          <option key={voice.voiceURI} value={voice.voiceURI} className="text-black">
+                            {voice.name} ({voice.lang})
+                          </option>
+                        ))}
+                      </select>
+                      <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center px-3 text-gray-400">
+                        <svg className="h-4 w-4 fill-current" viewBox="0 0 20 20"><path d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" /></svg>
+                      </div>
+                    </div>
                   </div>
                 </div>
               </div>

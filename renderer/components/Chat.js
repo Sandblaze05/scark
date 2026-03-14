@@ -12,7 +12,7 @@ import {
   Paperclip,
   PlusIcon,
   SendIcon,
-  XIcon,
+  X,
   LoaderIcon,
   Sparkles,
   Command,
@@ -30,7 +30,11 @@ import {
   Cpu,
   MessagesSquare,
   Bot,
-  Sun
+  Sun,
+  Wand2,
+  ThumbsUp,
+  ThumbsDown,
+  GitBranch
 } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { cn } from '../lib/utils'
@@ -87,6 +91,94 @@ const CodeBlock = React.memo(function CodeBlock({ language, value }) {
     </div>
   )
 })
+
+function FeedbackModal({ onClose, onSubmit }) {
+  const [selectedTags, setSelectedTags] = useState([])
+  const [details, setDetails] = useState('')
+  
+  const tags = [
+    "Incorrect or incomplete",
+    "Not what I asked for",
+    "Slow or buggy",
+    "Style or tone",
+    "Safety or legal concern",
+    "Other"
+  ]
+  
+  const toggleTag = (tag) => {
+    setSelectedTags(prev => 
+      prev.includes(tag) ? prev.filter(t => t !== tag) : [...prev, tag]
+    )
+  }
+  
+  return (
+    <motion.div 
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      exit={{ opacity: 0 }}
+      className="fixed inset-0 z-100 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4"
+      onClick={e => { if (e.target === e.currentTarget) onClose() }}
+    >
+      <motion.div 
+        initial={{ scale: 0.95, opacity: 0 }}
+        animate={{ scale: 1, opacity: 1 }}
+        className="w-full max-w-[480px] bg-[#171717] border border-white/10 rounded-2xl p-6 shadow-2xl overflow-hidden relative"
+      >
+        <button 
+          onClick={onClose}
+          className="absolute top-4 right-4 p-1 text-gray-400 hover:text-white transition-colors"
+        >
+          <X className="w-5 h-5" />
+        </button>
+        
+        <h3 className="text-xl font-semibold text-white mb-6">Share feedback</h3>
+        
+        <div className="flex flex-wrap gap-2 mb-6">
+          {tags.map(tag => (
+            <button
+              key={tag}
+              onClick={() => toggleTag(tag)}
+              className={cn(
+                "px-3 py-1.5 rounded-full text-sm border transition-all cursor-pointer",
+                selectedTags.includes(tag)
+                  ? "bg-white text-black border-white"
+                  : "bg-transparent text-gray-300 border-white/20 hover:border-white/40"
+              )}
+            >
+              {tag}
+            </button>
+          ))}
+        </div>
+        
+        <textarea
+          value={details}
+          onChange={e => setDetails(e.target.value)}
+          placeholder="Share details (optional)"
+          className="w-full h-24 bg-black/30 border border-white/10 rounded-xl px-4 py-3 text-sm text-white placeholder-gray-500 focus:outline-none focus:ring-1 focus:ring-white/20 transition-all resize-none mb-6"
+        />
+        
+        <div className="bg-white/5 rounded-xl p-4 mb-6 text-xs text-gray-400 leading-relaxed">
+          Your conversation will be included with your feedback to help improve Scark. <a href="#" className="underline hover:text-white transition-colors">Learn more</a>
+        </div>
+        
+        <div className="flex justify-end">
+          <button
+            onClick={() => onSubmit({ tags: selectedTags, details })}
+            disabled={selectedTags.length === 0 && !details.trim()}
+            className={cn(
+              "px-6 py-2 rounded-full text-sm font-semibold transition-all cursor-pointer",
+              (selectedTags.length > 0 || details.trim())
+                ? "bg-white text-black hover:bg-gray-200"
+                : "bg-white/10 text-gray-500 cursor-not-allowed"
+            )}
+          >
+            Submit
+          </button>
+        </div>
+      </motion.div>
+    </motion.div>
+  )
+}
 
 function useAutoResizeTextarea({ minHeight, maxHeight }) {
   const textareaRef = useRef(null)
@@ -776,6 +868,8 @@ export default function Chat({ isTemporary, setIsTemporary }) {
   // turnVersions: Map<turnIndex, {versions: [{userContent, assistantContent}], currentIdx}>
   const [turnVersions, setTurnVersions] = useState(new Map())
   const [editingTurn, setEditingTurn] = useState(null) // { turnIndex, value }
+  const [feedbackMap, setFeedbackMap] = useState(new Map()) // turnIndex -> 'positive' | 'negative'
+  const [userProfile, setUserProfile] = useState(null)
   const [speakingTurnIndex, setSpeakingTurnIndex] = useState(null)
   const speakingTurnIndexRef = useRef(null)
 
@@ -823,6 +917,16 @@ export default function Chat({ isTemporary, setIsTemporary }) {
     const utterance = new SpeechSynthesisUtterance(text)
     utterance.rate = 1
     utterance.pitch = 1
+
+    // Apply selected voice if available
+    if (userProfile?.selectedVoice) {
+      const voices = synth.getVoices()
+      const selected = voices.find(v => v.voiceURI === userProfile.selectedVoice)
+      if (selected) {
+        utterance.voice = selected
+      }
+    }
+
     utterance.onend = () => {
       setSpeakingTurnIndex((current) => (current === turnIndex ? null : current))
     }
@@ -832,7 +936,7 @@ export default function Chat({ isTemporary, setIsTemporary }) {
 
     setSpeakingTurnIndex(turnIndex)
     synth.speak(utterance)
-  }, [toReadableText])
+  }, [toReadableText, userProfile])
 
   // Broadcast active chat info to siblings (e.g. ChatArea header) via a window event.
   // This avoids IPC race conditions between siblings.
@@ -946,6 +1050,7 @@ export default function Chat({ isTemporary, setIsTemporary }) {
     setAttachments([])
     setAgentRoadmap(null)
     setFollowUpSuggestions([])
+    setFeedbackMap(new Map())
     streamBufferRef.current = ''
   }, [])
 
@@ -1133,6 +1238,21 @@ export default function Chat({ isTemporary, setIsTemporary }) {
       }
     }
     init()
+    
+    // Load profile
+    const loadProfile = async () => {
+      try {
+        const data = await window.scark?.profile?.get?.()
+        if (data) setUserProfile(data)
+      } catch (e) {}
+    }
+    loadProfile()
+
+    // Refresh profile when saved (window event)
+    const handleProfileSaved = (e) => {
+      if (e.detail) setUserProfile(e.detail)
+    }
+    window.addEventListener('scark:profileSaved', handleProfileSaved)
 
     return () => {
       removeError()
@@ -1140,6 +1260,7 @@ export default function Chat({ isTemporary, setIsTemporary }) {
       if (removeSelected) removeSelected()
       window.removeEventListener('scark:chatTitleOverride', handleTitleOverride)
       window.removeEventListener('keydown', handleKeyDown)
+      window.removeEventListener('scark:profileSaved', handleProfileSaved)
       delete window.__scarkActiveChatIdRef
     }
   }, [loadChatSession, resetTransientState])
@@ -1150,6 +1271,7 @@ export default function Chat({ isTemporary, setIsTemporary }) {
       setActiveChatId(null)
       setActiveChatTitle('Temporary Chat')
       setTurnVersions(new Map())
+      setFeedbackMap(new Map())
       setMessages([])
     }
   }, [isTemporary, resetTransientState])
@@ -1417,6 +1539,45 @@ export default function Chat({ isTemporary, setIsTemporary }) {
     setFollowUpSuggestions([])
     await executeSend(query, currentMode, messages)
   }
+  
+  const [isRefining, setIsRefining] = useState(false)
+  const [previousPrompt, setPreviousPrompt] = useState('')
+
+  const handleRefinePrompt = useCallback(async () => {
+    if (!value.trim() || isRefining || modelLoading) return
+    setIsRefining(true)
+    setPreviousPrompt(value)
+    try {
+      const refined = await webllmComplete([
+        {
+          role: 'system',
+          content: 
+            'You are a prompt engineering expert. Your task is to rewrite the user\'s message into a more detailed, clear, and research-optimized version. ' +
+            'Focus on making it specific and likely to yield high-quality, comprehensive information. ' +
+            'Keep it reasonably concise (under 80 words) but much more descriptive than the original. ' +
+            'CRITICAL RULES:\n' +
+            '- Output ONLY the refined prompt text.\n' +
+            '- DO NOT include any conversational filler, meta-talk, questions, or explanations.\n' +
+            '- NEVER say things like "This will help me refine...", "Here is...", or ask "Can you provide more context?".\n' +
+            '- If the prompt is vague, use your knowledge to create a comprehensive research-ready prompt based on the most likely interpretation.'
+        },
+        { role: 'user', content: value.trim() }
+      ], { temperature: 0.7, maxTokens: 150 })
+      
+      if (refined && refined.trim()) {
+        let cleaned = refined.trim()
+        // Remove common boilerplate patterns if they leak through
+        cleaned = cleaned.replace(/This will help me refine the prompt and provide a more accurate and comprehensive response\.?/gi, '')
+        cleaned = cleaned.replace(/Here is the( refined)? prompt:?/gi, '')
+        cleaned = cleaned.replace(/^Refined Prompt:?/i, '')
+        setValue(cleaned.trim())
+      }
+    } catch (e) {
+      console.warn('[Chat] Prompt refinement failed:', e)
+    } finally {
+      setIsRefining(false)
+    }
+  }, [value, isRefining, modelLoading])
 
   // Define a simple wrapper for the UI to use
   const handleSendMessageOverride = (text) => handleSendMessage(text)
@@ -1525,6 +1686,46 @@ export default function Chat({ isTemporary, setIsTemporary }) {
     await executeSend(userText, mode, msgsUpToTurn)
   }, [isTyping, messages, mode, executeSend, activeChatId, isTemporary])
 
+  const handleFeedback = useCallback((turnIndex, isPositive) => {
+    if (isPositive) {
+      setFeedbackMap(prev => {
+        const next = new Map(prev)
+        next.set(turnIndex, { type: 'positive' })
+        return next
+      })
+    } else {
+      setFeedbackModalTurnIndex(turnIndex)
+    }
+  }, [])
+
+  const [feedbackModalTurnIndex, setFeedbackModalTurnIndex] = useState(null)
+
+  const handleBranch = useCallback(async (turnIndex, turns) => {
+    if (isTyping) return
+    const turn = turns[turnIndex]
+    const msgsToKeep = messages.slice(0, turn.startIndex + 2) // keep user + assistant messages of this turn
+
+    const newChat = await window.scark?.chat?.create?.({ 
+      title: `Branch: ${activeChatTitle.slice(0, 20)}...`,
+      select: true 
+    })
+    
+    if (newChat?.id) {
+      // Add existing messages to the new chat
+      for (const msg of msgsToKeep) {
+        await window.scark?.chat?.addMessage?.({
+          chatId: newChat.id,
+          role: msg.role,
+          content: msg.content,
+          reasoningPreview: msg.reasoningPreview || '',
+          roadmapSnapshot: msg.roadmapSnapshot ? JSON.stringify(msg.roadmapSnapshot) : null
+        })
+      }
+      
+      // Select the new chat (handled by onSelected in useEffect)
+    }
+  }, [isTyping, messages, activeChatTitle])
+
   const handleStopResponse = async () => {
     if (webllmAbortRef.current) {
       webllmAbortRef.current.abort()
@@ -1562,6 +1763,11 @@ export default function Chat({ isTemporary, setIsTemporary }) {
     } else if (e.key === 'r' && (e.metaKey || e.ctrlKey)) {
       e.preventDefault()
       setMode(m => m === 'ask' ? 'research' : 'ask')
+    } else if (e.key === 'z' && (e.metaKey || e.ctrlKey) && previousPrompt) {
+      // Undo prompt refinement
+      e.preventDefault()
+      setValue(previousPrompt)
+      setPreviousPrompt('')
     }
   }
 
@@ -1827,17 +2033,51 @@ export default function Chat({ isTemporary, setIsTemporary }) {
                             </ReactMarkdown>
                           </article>
                         ) : null}
-                        {/* Copy button for assistant messages */}
+                        {/* Response Action Toolbar */}
                         {turn.assistantMsg && (
-                          <div className="flex items-center gap-1.5 mt-1 opacity-0 group-hover:opacity-100 transition-opacity duration-150">
+                          <div className="flex items-center gap-1.5 mt-2 transition-opacity duration-150">
+                            {/* Feedback */}
+                            <div className="flex items-center gap-0.5 mr-1">
+                              {(feedbackMap.get(turnIndex)?.type === 'positive' || !feedbackMap.get(turnIndex)) && (
+                                <button
+                                  onClick={() => handleFeedback(turnIndex, true)}
+                                  className={cn(
+                                    "p-1.5 rounded-lg transition-colors",
+                                    feedbackMap.get(turnIndex)?.type === 'positive' 
+                                      ? "text-gray-600 dark:text-gray-200 bg-black/5 dark:bg-white/10" 
+                                      : "text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 hover:bg-black/5 dark:hover:bg-white/10"
+                                  )}
+                                  title="Good response"
+                                >
+                                  <ThumbsUp className={cn("w-3.5 h-3.5", feedbackMap.get(turnIndex)?.type === 'positive' && "fill-current")} />
+                                </button>
+                              )}
+                              {(feedbackMap.get(turnIndex)?.type === 'negative' || !feedbackMap.get(turnIndex)) && (
+                                <button
+                                  onClick={() => handleFeedback(turnIndex, false)}
+                                  className={cn(
+                                    "p-1.5 rounded-lg transition-colors",
+                                    feedbackMap.get(turnIndex)?.type === 'negative' 
+                                      ? "text-gray-600 dark:text-gray-200 bg-black/5 dark:bg-white/10" 
+                                      : "text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 hover:bg-black/5 dark:hover:bg-white/10"
+                                  )}
+                                  title="Bad response"
+                                >
+                                  <ThumbsDown className={cn("w-3.5 h-3.5", feedbackMap.get(turnIndex)?.type === 'negative' && "fill-current")} />
+                                </button>
+                              )}
+                            </div>
+
+                            <div className="w-px h-3 bg-black/10 dark:bg-white/10 mx-0.5" />
+
                             <button
-                              title={speakingTurnIndex === turnIndex ? 'Stop reading aloud' : 'Read aloud'}
-                              aria-label={speakingTurnIndex === turnIndex ? 'Stop reading this response aloud' : 'Read this response aloud'}
-                              onClick={() => speakAssistantMessage(turnIndex, assistantTextForReadAloud)}
+                              title="Copy response"
+                              onClick={() => window.scark?.utils?.copyToClipboard?.(turn.assistantMsg.content)}
                               className="p-1.5 rounded-lg text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 hover:bg-zinc-100 dark:hover:bg-white/10 transition-colors"
                             >
-                              {speakingTurnIndex === turnIndex ? <VolumeX className="w-3.5 h-3.5" /> : <Volume2 className="w-3.5 h-3.5" />}
+                              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-3.5 h-3.5"><rect x="9" y="9" width="13" height="13" rx="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" /></svg>
                             </button>
+
                             <button
                               title="Regenerate response"
                               onClick={() => handleRegenerate(turnIndex, groupedTurns)}
@@ -1845,12 +2085,21 @@ export default function Chat({ isTemporary, setIsTemporary }) {
                             >
                               <RefreshCw className="w-3.5 h-3.5" />
                             </button>
+
                             <button
-                              title="Copy response"
-                              onClick={() => window.scark?.utils?.copyToClipboard?.(turn.assistantMsg.content)}
+                              title={speakingTurnIndex === turnIndex ? 'Stop reading aloud' : 'Read aloud'}
+                              onClick={() => speakAssistantMessage(turnIndex, assistantTextForReadAloud)}
                               className="p-1.5 rounded-lg text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 hover:bg-zinc-100 dark:hover:bg-white/10 transition-colors"
                             >
-                              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-3.5 h-3.5"><rect x="9" y="9" width="13" height="13" rx="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" /></svg>
+                              {speakingTurnIndex === turnIndex ? <VolumeX className="w-3.5 h-3.5" /> : <Volume2 className="w-3.5 h-3.5" />}
+                            </button>
+
+                            <button
+                              onClick={() => handleBranch(turnIndex, groupedTurns)}
+                              className="p-1.5 rounded-lg text-gray-400 hover:text-violet-500 hover:bg-violet-500/10 transition-colors"
+                              title="Branch chat from here"
+                            >
+                              <GitBranch className="w-3.5 h-3.5" />
                             </button>
                           </div>
                         )}
@@ -2219,6 +2468,20 @@ export default function Chat({ isTemporary, setIsTemporary }) {
                   <FlaskConical className="w-3.5 h-3.5" /> Deep Research
                 </button>
               </div>
+
+              <button
+                onClick={handleRefinePrompt}
+                disabled={!value.trim() || isRefining || modelLoading}
+                className={cn(
+                  "p-2 rounded-lg transition-all cursor-pointer flex items-center gap-2",
+                  isRefining ? "text-violet-500 animate-pulse bg-violet-500/10" : "text-muted-foreground hover:text-violet-500 hover:bg-violet-500/10",
+                  (!value.trim() || modelLoading) && "opacity-40 cursor-not-allowed pointer-events-none"
+                )}
+                title="Refine Prompt (AI)"
+              >
+                <Wand2 className={cn("w-4 h-4", isRefining && "text-violet-400")} />
+                {isRefining && <span className="text-[10px] font-bold uppercase tracking-widest">Refining...</span>}
+              </button>
             </div>
 
             <div className="flex items-center gap-2 relative" ref={modelMenuRef}>
@@ -2307,6 +2570,22 @@ export default function Chat({ isTemporary, setIsTemporary }) {
         </motion.div>
 
       </div>
+
+      <AnimatePresence>
+        {feedbackModalTurnIndex !== null && (
+          <FeedbackModal 
+            onClose={() => setFeedbackModalTurnIndex(null)}
+            onSubmit={(data) => {
+              setFeedbackMap(prev => {
+                const next = new Map(prev)
+                next.set(feedbackModalTurnIndex, { type: 'negative', ...data })
+                return next
+              })
+              setFeedbackModalTurnIndex(null)
+            }}
+          />
+        )}
+      </AnimatePresence>
     </div>
   )
 }
