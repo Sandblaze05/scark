@@ -6,8 +6,18 @@
  */
 
 import * as webllm from '@mlc-ai/web-llm';
+import { Zap, MessagesSquare, Sparkles, Sun, Cpu } from 'lucide-react'
 
 export const DEFAULT_MODEL = 'Llama-3.2-3B-Instruct-q4f16_1-MLC';
+
+// Shared model definitions available for download/use
+export const AVAILABLE_MODELS = [
+    { id: 'Llama-3.2-3B-Instruct-q4f16_1-MLC', name: 'Llama 3.2 3B', icon: Zap, color: 'text-violet-400', contextWindow: 4096 },
+    { id: 'Llama-3.2-1B-Instruct-q4f16_1-MLC', name: 'Llama 3.2 1B', icon: MessagesSquare, color: 'text-emerald-400', contextWindow: 4096 },
+    { id: 'Phi-3.5-mini-instruct-q4f16_1-MLC', name: 'Phi-3.5 Mini', icon: Sparkles, color: 'text-blue-400', contextWindow: 4096 },
+    { id: 'Qwen2.5-1.5B-Instruct-q4f16_1-MLC', name: 'Qwen 1.5B', icon: Sun, color: 'text-orange-400', contextWindow: 8192 },
+    { id: 'gemma-2b-it-q4f16_1-MLC', name: 'Gemma 2B', icon: Cpu, color: 'text-green-400', contextWindow: 4096 },
+];
 
 // Persist engine state on globalThis so HMR module reloads don't destroy an
 // already-loaded engine or create duplicate initialisation.  In production the
@@ -41,6 +51,20 @@ export function initEngine(model = DEFAULT_MODEL, onProgress) {
         );
     }
 
+    if (_s.engine && _s.loadedModel !== model) {
+        // Engine exists, but we want to load a different model.
+        if (onProgress) _s.engine.setInitProgressCallback(onProgress);
+        _s.promise = _s.engine.reload(model).then(() => {
+            _s.loadedModel = model;
+            _s.promise = null;
+            return _s.engine;
+        }).catch(err => {
+            _s.promise = null; // allow retry on failure
+            throw err;
+        });
+        return _s.promise;
+    }
+
     _s.promise = webllm.CreateWebWorkerMLCEngine(_s.worker, model, {
         initProgressCallback: onProgress,
     }).then(engine => {
@@ -61,15 +85,35 @@ export function isEngineReady() {
     return _s.engine !== null;
 }
 
-// ── Context-window guard ──────────────────────────────────
+/** Check if model exists in IndexedDB cache */
+export async function checkModelCached(modelId) {
+    return await webllm.hasModelInCache(modelId);
+}
 
-// Llama-3.2-3B has a 4096-token context window.  Reserve ~900 tokens for the
-// completion; the remaining ~3200 is the prompt budget.
-const PROMPT_TOKEN_BUDGET = 3200;
+/** Delete a model from IndexedDB cache */
+export async function deleteModel(modelId) {
+    if (_s.engine && _s.loadedModel === modelId) {
+        // If it's the currently active model, we need to unload it
+        _s.engine.unload();
+        _s.engine = null;
+        _s.loadedModel = null;
+    }
+    await webllm.deleteModelAllInfoInCache(modelId);
+}
+
+// ── Context-window guard ──────────────────────────────────
 
 /** Rough token estimator: ~4 chars per token for English / code text. */
 function estimateTokens(text) {
     return Math.ceil((text || '').length / 4);
+}
+
+function getPromptTokenBudget() {
+    // If a model is loaded, calculate based on its capacity, otherwise default to 4096 capacity.
+    const model = AVAILABLE_MODELS.find(m => m.id === _s.loadedModel);
+    const windowSize = model?.contextWindow || 4096;
+    // Reserve ~900 tokens for the completion; the remaining is the prompt budget.
+    return windowSize - 900;
 }
 
 /**
@@ -84,7 +128,7 @@ function trimMessages(messages) {
     const system = messages.filter(m => m.role === 'system');
     const turns = messages.filter(m => m.role !== 'system');
 
-    let budget = PROMPT_TOKEN_BUDGET -
+    let budget = getPromptTokenBudget() -
         system.reduce((s, m) => s + estimateTokens(m.content), 0);
 
     const kept = [];

@@ -26,15 +26,9 @@ import {
   ChevronDown,
   Lock,
   ArrowRight,
-  Zap,
-  Cpu,
-  MessagesSquare,
-  Bot,
-  Sun,
   Wand2,
   ThumbsUp,
-  ThumbsDown,
-  GitBranch
+  ThumbsDown
 } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { cn } from '../lib/utils'
@@ -45,7 +39,7 @@ import remarkExternalLinks from 'remark-external-links'
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism'
 import { Copy, Check } from 'lucide-react'
-import { initEngine, streamChat as webllmStreamChat, complete as webllmComplete, DEFAULT_MODEL, planActions } from '../lib/webllm'
+import { initEngine, streamChat as webllmStreamChat, complete as webllmComplete, DEFAULT_MODEL, planActions, AVAILABLE_MODELS, checkModelCached } from '../lib/webllm'
 import { runAgentLoop } from '../lib/agentLoop'
 
 const CodeBlock = React.memo(function CodeBlock({ language, value }) {
@@ -491,18 +485,57 @@ export default function Chat({ isTemporary, setIsTemporary }) {
   const [modelProgress, setModelProgress] = useState('')
   const [modelProgressPercent, setModelProgressPercent] = useState(0)
 
-  const [selectedModel, setSelectedModel] = useState({ id: 'sonar', name: 'Sonar', icon: Zap })
+  const [availableModels, setAvailableModels] = useState([])
+  const [selectedModel, setSelectedModel] = useState(null)
   const [showModelMenu, setShowModelMenu] = useState(false)
   const modelMenuRef = useRef(null)
 
-  const models = [
-    { id: 'sonar', name: 'Sonar', icon: Zap, color: 'text-violet-400' },
-    { id: 'gpt-5.4', name: 'GPT-5.4', icon: MessagesSquare, color: 'text-emerald-400' },
-    { id: 'gemini-3.1-pro', name: 'Gemini 3.1 Pro', icon: Sparkles, color: 'text-blue-400' },
-    { id: 'claude-sonnet-4.6', name: 'Claude Sonnet 4.6', icon: Sun, color: 'text-orange-400' },
-    { id: 'claude-opus-4.6', name: 'Claude Opus 4.6', icon: Sun, color: 'text-orange-500' },
-    { id: 'nemotron-3-super', name: 'Nemotron 3 Super', icon: Cpu, color: 'text-green-400' },
-  ]
+  const checkDownloadedModels = useCallback(async () => {
+    try {
+      const downloaded = []
+      for (const m of AVAILABLE_MODELS) {
+        if (await checkModelCached(m.id)) {
+          downloaded.push(m)
+        }
+      }
+      setAvailableModels(downloaded)
+      // Pick the first downloaded one if currently selected is invalid or none is selected
+      setSelectedModel(prev => {
+        if (!prev || !downloaded.find(d => d.id === prev.id)) {
+          return downloaded.find(d => d.id === DEFAULT_MODEL) || downloaded[0] || null
+        }
+        return prev
+      })
+    } catch (err) {
+      console.error('[Chat] Failed to check downloaded models', err)
+    }
+  }, [])
+
+  useEffect(() => {
+    checkDownloadedModels()
+    const handleModelsChanged = () => checkDownloadedModels()
+    window.addEventListener('scark:modelsChanged', handleModelsChanged)
+    return () => window.removeEventListener('scark:modelsChanged', handleModelsChanged)
+  }, [checkDownloadedModels])
+
+  const handleModelSelect = useCallback((model) => {
+    setSelectedModel(model)
+    setShowModelMenu(false)
+    setModelLoading(true)
+    initEngine(model.id, (report) => {
+      const pct = Math.round((report.progress ?? 0) * 100)
+      setModelProgressPercent(pct)
+      setModelProgress(report.text || `Loading model… ${pct}%`)
+    }).then(() => {
+      setModelProgressPercent(100)
+      setModelLoading(false)
+      setModelProgress('')
+    }).catch(err => {
+      console.error('[WebLLM] Init failed:', err)
+      setModelLoading(false)
+      setModelProgress('Model failed to load. Check WebGPU support.')
+    })
+  }, [])
 
   useEffect(() => {
     const handleClickOutside = (event) => {
@@ -1700,32 +1733,6 @@ export default function Chat({ isTemporary, setIsTemporary }) {
 
   const [feedbackModalTurnIndex, setFeedbackModalTurnIndex] = useState(null)
 
-  const handleBranch = useCallback(async (turnIndex, turns) => {
-    if (isTyping) return
-    const turn = turns[turnIndex]
-    const msgsToKeep = messages.slice(0, turn.startIndex + 2) // keep user + assistant messages of this turn
-
-    const newChat = await window.scark?.chat?.create?.({ 
-      title: `Branch: ${activeChatTitle.slice(0, 20)}...`,
-      select: true 
-    })
-    
-    if (newChat?.id) {
-      // Add existing messages to the new chat
-      for (const msg of msgsToKeep) {
-        await window.scark?.chat?.addMessage?.({
-          chatId: newChat.id,
-          role: msg.role,
-          content: msg.content,
-          reasoningPreview: msg.reasoningPreview || '',
-          roadmapSnapshot: msg.roadmapSnapshot ? JSON.stringify(msg.roadmapSnapshot) : null
-        })
-      }
-      
-      // Select the new chat (handled by onSelected in useEffect)
-    }
-  }, [isTyping, messages, activeChatTitle])
-
   const handleStopResponse = async () => {
     if (webllmAbortRef.current) {
       webllmAbortRef.current.abort()
@@ -2092,14 +2099,6 @@ export default function Chat({ isTemporary, setIsTemporary }) {
                               className="p-1.5 rounded-lg text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 hover:bg-zinc-100 dark:hover:bg-white/10 transition-colors"
                             >
                               {speakingTurnIndex === turnIndex ? <VolumeX className="w-3.5 h-3.5" /> : <Volume2 className="w-3.5 h-3.5" />}
-                            </button>
-
-                            <button
-                              onClick={() => handleBranch(turnIndex, groupedTurns)}
-                              className="p-1.5 rounded-lg text-gray-400 hover:text-violet-500 hover:bg-violet-500/10 transition-colors"
-                              title="Branch chat from here"
-                            >
-                              <GitBranch className="w-3.5 h-3.5" />
                             </button>
                           </div>
                         )}
@@ -2486,7 +2485,7 @@ export default function Chat({ isTemporary, setIsTemporary }) {
 
             <div className="flex items-center gap-2 relative" ref={modelMenuRef}>
               <AnimatePresence>
-                {showModelMenu && (
+                {showModelMenu && availableModels.length > 0 && (
                   <motion.div
                     initial={{ opacity: 0, y: 10, scale: 0.95 }}
                     animate={{ opacity: 1, y: 0, scale: 1 }}
@@ -2495,21 +2494,18 @@ export default function Chat({ isTemporary, setIsTemporary }) {
                     className="absolute bottom-full right-0 mb-3 w-64 bg-black border border-white/10 rounded-2xl shadow-2xl overflow-hidden z-50 p-1"
                   >
                     <div className="p-1 space-y-0.5">
-                      {models.map((m) => (
+                      {availableModels.map((m) => (
                         <button
                           key={m.id}
-                          onClick={() => {
-                            setSelectedModel(m)
-                            setShowModelMenu(false)
-                          }}
+                          onClick={() => handleModelSelect(m)}
                           className={cn(
                             "w-full flex items-center justify-between px-3 py-2.5 rounded-xl transition-all duration-200 group/item",
-                            selectedModel.id === m.id ? "bg-white/10" : "hover:bg-white/5"
+                            selectedModel?.id === m.id ? "bg-white/10" : "hover:bg-white/5"
                           )}
                         >
                           <div className="flex items-center gap-3">
                             <m.icon className={cn("w-4 h-4", m.color || "text-white/60")} />
-                            <span className={cn("text-xs font-medium transition-colors", selectedModel.id === m.id ? "text-white" : "text-white/60 group-hover/item:text-white/90")}>
+                            <span className={cn("text-xs font-medium transition-colors", selectedModel?.id === m.id ? "text-white" : "text-white/60 group-hover/item:text-white/90")}>
                               {m.name}
                             </span>
                           </div>
@@ -2522,10 +2518,13 @@ export default function Chat({ isTemporary, setIsTemporary }) {
 
               <button
                 onClick={() => setShowModelMenu(!showModelMenu)}
-                className="h-8.5 px-3.5 flex items-center gap-2 rounded-full text-xs font-semibold bg-white/5 hover:bg-white/10 border border-white/10 transition-all text-white/90 shadow-sm"
+                disabled={availableModels.length === 0}
+                className="h-8.5 px-3.5 flex items-center gap-2 rounded-full text-xs font-semibold bg-white/5 hover:bg-white/10 border border-white/10 transition-all text-white/90 shadow-sm disabled:opacity-50"
               >
-                <span>{selectedModel.name}</span>
-                <ChevronDown className={cn("w-3.5 h-3.5 opacity-60 transition-transform duration-300", showModelMenu ? "rotate-180" : "")} />
+                <span>{selectedModel ? selectedModel.name : 'No models downloaded'}</span>
+                {availableModels.length > 0 && (
+                  <ChevronDown className={cn("w-3.5 h-3.5 opacity-60 transition-transform duration-300", showModelMenu ? "rotate-180" : "")} />
+                )}
               </button>
 
               <AnimatePresence mode="wait">
