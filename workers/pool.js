@@ -19,6 +19,7 @@ export class WorkerPool {
     #workers = [];
     #idle = [];
     #queue = [];
+    #queueSeq = 0;
 
     /**
      * @param {string|URL} workerScript – path to the worker .js file
@@ -63,6 +64,15 @@ export class WorkerPool {
         }
     }
 
+    #enqueue(entry) {
+        this.#queue.push(entry);
+        // Higher priority first; FIFO among equal priorities.
+        this.#queue.sort((a, b) => {
+            if (a.priority !== b.priority) return b.priority - a.priority;
+            return a.seq - b.seq;
+        });
+    }
+
     #dispatch(worker, task, resolve, reject) {
         const taskId = randomUUID();
 
@@ -96,15 +106,22 @@ export class WorkerPool {
      * Submit a task to the pool.  Resolves when a worker finishes it.
      *
      * @param {{ type: string, data?: any }} task
+     * @param {{ priority?: number }} [options]
      * @returns {Promise<any>}
      */
-    exec(task) {
+    exec(task, options = {}) {
         return new Promise((resolve, reject) => {
             const worker = this.#idle.pop();
             if (worker) {
                 this.#dispatch(worker, task, resolve, reject);
             } else {
-                this.#queue.push({ task, resolve, reject });
+                this.#enqueue({
+                    task,
+                    resolve,
+                    reject,
+                    priority: Number.isFinite(options.priority) ? options.priority : 0,
+                    seq: this.#queueSeq++,
+                });
             }
         });
     }

@@ -39,7 +39,7 @@ import remarkExternalLinks from 'remark-external-links'
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism'
 import { Copy, Check } from 'lucide-react'
-import { initEngine, streamChat as webllmStreamChat, complete as webllmComplete, DEFAULT_MODEL, planActions, AVAILABLE_MODELS, checkModelCached } from '../lib/webllm'
+import { initEngine, streamChat as webllmStreamChat, complete as webllmComplete, DEFAULT_MODEL, AVAILABLE_MODELS, checkModelCached } from '../lib/webllm'
 import { runAgentLoop } from '../lib/agentLoop'
 
 const CodeBlock = React.memo(function CodeBlock({ language, value }) {

@@ -146,13 +146,22 @@ const handlers = {
         const browser = await chromium.launch({ headless: true });
         let cleaned = [];
         try {
-            const seedUrls = await seedSearch(browser, { keyword, count: max });
+            const seedUrls = await seedSearch(browser, {
+                keyword,
+                count: max,
+                search: {
+                    gotoTimeout: 10000,
+                    selectorTimeout: 5000,
+                    totalTimeout: 18000,
+                },
+            });
             if (seedUrls.length > 0) {
                 const rawPages = await crawl(browser, seedUrls, {
                     concurrency: 2,
                     hardMaxPages: max,
                     maxConsecutiveMisses: max,
                     keyword,
+                    navTimeout: 12000,
                 });
 
                 cleaned = cleanPages(rawPages, { keyword: '' });
@@ -192,7 +201,15 @@ const handlers = {
         try {
             // Seed all queries in parallel, dedupe URLs
             const seedSets = await Promise.all(
-                queries.map(q => seedSearch(browser, { keyword: q, count: perQuery }).catch(() => []))
+                queries.map(q => seedSearch(browser, {
+                    keyword: q,
+                    count: perQuery,
+                    search: {
+                        gotoTimeout: 9000,
+                        selectorTimeout: 4500,
+                        totalTimeout: 14000,
+                    },
+                }).catch(() => []))
             );
             const seen = new Set();
             const allSeeds = seedSets.flat().filter(url => {
@@ -209,6 +226,7 @@ const handlers = {
                 hardMaxPages: totalCap,
                 maxConsecutiveMisses: totalCap,
                 keyword: queries[0],
+                navTimeout: 12000,
             });
 
             const cleaned = cleanPages(rawPages, { keyword: '' });

@@ -28,9 +28,10 @@ import { seed as defaults } from './config.js';
 export async function seedSearch(browser, opts = {}) {
     const keyword = opts.keyword ?? defaults.keyword;
     const count   = opts.count   ?? defaults.count;
+    const searchOpts = opts.search ?? {};
 
     console.log(`[SeedSearch] Searching for "${keyword}" (max ${count} seeds)…`);
-    const urls = await _search(browser, keyword, count);
+    const urls = await _search(browser, keyword, count, searchOpts);
 
     if (urls.length === 0) {
         console.warn('[SeedSearch] No seed URLs found from any search engine.');

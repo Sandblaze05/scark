@@ -40,7 +40,9 @@ if (process.env.SCARK_DISABLE_HIGH_PERF_GPU !== '1') {
 let mainWindow;
 let ingestionPool;
 let queryPool;
-const DEFAULT_POOL_SIZE = isDev ? 1 : 2;
+const INGESTION_POOL_SIZE = parseInt(process.env.SCARK_INGESTION_POOL_SIZE || '', 10) || (isDev ? 2 : 3);
+const QUERY_POOL_SIZE = parseInt(process.env.SCARK_QUERY_POOL_SIZE || '', 10) || (isDev ? 2 : 2);
+const INTERACTIVE_MAX_QUEUE_DEPTH = parseInt(process.env.SCARK_INTERACTIVE_MAX_QUEUE_DEPTH || '', 10) || 3;
 
 function ensureDefaultChat() {
     const chats = listChatSessions();
@@ -117,7 +119,7 @@ async function waitForDevServer(url, retries = 60) {
 function getIngestionPool() {
     if (!ingestionPool) {
         const ingestionScript = path.join(__dirname, '../workers/ingestion.worker.js');
-        ingestionPool = new WorkerPool(ingestionScript, DEFAULT_POOL_SIZE);
+        ingestionPool = new WorkerPool(ingestionScript, INGESTION_POOL_SIZE);
         console.log('[Main] Ingestion worker pool ready:', ingestionPool.stats);
     }
     return ingestionPool;
@@ -126,7 +128,7 @@ function getIngestionPool() {
 function getQueryPool() {
     if (!queryPool) {
         const queryScript = path.join(__dirname, '../workers/query.worker.js');
-        queryPool = new WorkerPool(queryScript, DEFAULT_POOL_SIZE);
+        queryPool = new WorkerPool(queryScript, QUERY_POOL_SIZE);
         console.log('[Main] Query worker pool ready:', queryPool.stats);
     }
     return queryPool;
@@ -204,17 +206,17 @@ function registerIPC() {
 
     // Run full ingestion pipeline
     ipcMain.handle('pipeline:run', (_event, opts) => {
-        return getIngestionPool().exec({ type: 'runPipeline', data: { opts } });
+        return getIngestionPool().exec({ type: 'runPipeline', data: { opts } }, { priority: 1 });
     });
 
     // Run a single pipeline stage
     ipcMain.handle('pipeline:stage', (_event, stage, data) => {
-        return getIngestionPool().exec({ type: stage, data });
+        return getIngestionPool().exec({ type: stage, data }, { priority: 2 });
     });
 
     // Query: embed text + search ChromaDB
     ipcMain.handle('query:search', (_event, query, topK) => {
-        return getQueryPool().exec({ type: 'queryChroma', data: { query, topK } });
+        return getQueryPool().exec({ type: 'queryChroma', data: { query, topK } }, { priority: 7 });
     });
 
     // Chat: retrieve RAG context only - LLM streaming is handled by WebLLM in the renderer
@@ -265,7 +267,7 @@ function registerIPC() {
                         contextChunks = await getQueryPool().exec({
                             type: 'retrieveContext',
                             data: { query: searchQuery, topK: k },
-                        }) ?? [];
+                        }, { priority: 8 }) ?? [];
                         console.log('[Context] ChromaDB returned', contextChunks.length, 'chunk(s)');
                     } catch (e) {
                         console.warn('[Context] ChromaDB retrieval failed:', e.message);
@@ -279,7 +281,7 @@ function registerIPC() {
                         const webResults = await getIngestionPool().exec({
                             type: 'researchFetch',
                             data: { keyword: searchQuery, maxPages: 5 },
-                        });
+                        }, { priority: 5 });
                         contextChunks = webResults.map(p => ({ id: p.url, title: p.title, url: p.url, text: p.text, distance: null }));
                     } catch (e) {
                         console.warn('[Context] Research fetch failed:', e.message);
@@ -300,7 +302,7 @@ function registerIPC() {
                         const allChunks = await getQueryPool().exec({
                             type: 'retrieveContext',
                             data: { query: searchQuery, topK: k },
-                        }) ?? [];
+                        }, { priority: 8 }) ?? [];
                         contextChunks = allChunks.filter(c => c.distance != null && c.distance < RELEVANCE_THRESHOLD);
                         console.log('[Context] Ask mode — ChromaDB relevant chunks:', contextChunks.length);
                     } catch (e) {
@@ -338,25 +340,54 @@ function registerIPC() {
     ipcMain.handle('query:websearch', async (_event, query, maxPages = 3) => {
         console.log(`[WebSearch] Request: "${query}" (maxPages: ${maxPages})`);
         const pool = getIngestionPool();
+        const startedAt = Date.now();
 
-        // If the worker pool is already busy (all workers occupied), return
-        // immediately instead of queueing behind a long-running search that
-        // will just cause the frontend to time out again.
-        if (pool.stats.idle === 0) {
-            console.warn(`[WebSearch] Pool busy (${pool.stats.busy} active, ${pool.stats.queued} queued) — skipping to avoid timeout.`);
-            return [];
+        // Allow a small queue for interactive requests; reject only if queue is saturated.
+        if (pool.stats.queued >= INTERACTIVE_MAX_QUEUE_DEPTH) {
+            console.warn(`[WebSearch] Queue saturated (${pool.stats.queued}) — rejecting interactive request.`);
+            return {
+                status: 'busy',
+                reason: 'ingestion queue saturated',
+                results: [],
+                meta: {
+                    query,
+                    maxPages,
+                    elapsedMs: Date.now() - startedAt,
+                    pool: pool.stats,
+                },
+            };
         }
 
         try {
             const webResults = await pool.exec({
                 type: 'quickSearch',
                 data: { keyword: query, maxPages },
-            });
+            }, { priority: 10 });
             console.log(`[WebSearch] Completed: ${(webResults ?? []).length} result(s)`);
-            return (webResults ?? []).map(p => ({ title: p.title, url: p.url, text: p.text }));
+            const results = (webResults ?? []).map(p => ({ title: p.title, url: p.url, text: p.text }));
+            return {
+                status: 'completed',
+                reason: '',
+                results,
+                meta: {
+                    query,
+                    maxPages,
+                    elapsedMs: Date.now() - startedAt,
+                    resultCount: results.length,
+                },
+            };
         } catch (e) {
             console.warn('[WebSearch] Failed:', e.message);
-            return [];
+            return {
+                status: 'failed',
+                reason: e.message,
+                results: [],
+                meta: {
+                    query,
+                    maxPages,
+                    elapsedMs: Date.now() - startedAt,
+                },
+            };
         }
     });
 
@@ -364,22 +395,53 @@ function registerIPC() {
     ipcMain.handle('query:batchWebsearch', async (_event, queries, maxTotalPages = 5) => {
         console.log(`[BatchWebSearch] Request: ${queries.length} queries (maxTotalPages: ${maxTotalPages})`);
         const pool = getIngestionPool();
+        const startedAt = Date.now();
 
-        if (pool.stats.idle === 0) {
-            console.warn(`[BatchWebSearch] Pool busy — skipping to avoid timeout.`);
-            return [];
+        if (pool.stats.queued >= INTERACTIVE_MAX_QUEUE_DEPTH) {
+            console.warn(`[BatchWebSearch] Queue saturated (${pool.stats.queued}) — rejecting interactive request.`);
+            return {
+                status: 'busy',
+                reason: 'ingestion queue saturated',
+                results: [],
+                meta: {
+                    queries,
+                    maxTotalPages,
+                    elapsedMs: Date.now() - startedAt,
+                    pool: pool.stats,
+                },
+            };
         }
 
         try {
             const webResults = await pool.exec({
                 type: 'batchQuickSearch',
                 data: { queries, maxTotalPages },
-            });
+            }, { priority: 10 });
             console.log(`[BatchWebSearch] Completed: ${(webResults ?? []).length} result(s)`);
-            return (webResults ?? []).map(p => ({ title: p.title, url: p.url, text: p.text }));
+            const results = (webResults ?? []).map(p => ({ title: p.title, url: p.url, text: p.text }));
+            return {
+                status: 'completed',
+                reason: '',
+                results,
+                meta: {
+                    queries,
+                    maxTotalPages,
+                    elapsedMs: Date.now() - startedAt,
+                    resultCount: results.length,
+                },
+            };
         } catch (e) {
             console.warn('[BatchWebSearch] Failed:', e.message);
-            return [];
+            return {
+                status: 'failed',
+                reason: e.message,
+                results: [],
+                meta: {
+                    queries,
+                    maxTotalPages,
+                    elapsedMs: Date.now() - startedAt,
+                },
+            };
         }
     });
 
@@ -389,7 +451,7 @@ function registerIPC() {
             const result = await getIngestionPool().exec({
                 type: 'fetchUrl',
                 data: { url },
-            });
+            }, { priority: 9 });
             return result ?? null;
         } catch (e) {
             console.warn('[FetchUrl] Failed:', e.message);

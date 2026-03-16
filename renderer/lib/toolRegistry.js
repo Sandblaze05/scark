@@ -66,14 +66,36 @@ export function registerDefaultAdapters() {
       const scark = ctx.scark
       const mode = ctx.state?.mode || 'ask'
       const maxPages = mode === 'research' ? 5 : (ctx.state?.pageCap || 2)
-      const timeout = mode === 'research' ? 75000 : 55000
+      const timeout = mode === 'research' ? 130000 : 70000
       const cleanQuery = sanitizeSearchQuery(args.query || '')
       const awaitWithAbort = ctx.awaitWithAbort
 
       const call = scark?.query?.websearch ? scark.query.websearch(cleanQuery, maxPages) : Promise.resolve([])
-      const res = await (awaitWithAbort ? awaitWithAbort(call, ctx.abortCtrl, timeout) : call)
-      const results = (res ?? []).map(h => ({ type: 'web', title: h.title, url: h.url, text: h.text }))
-      return { results, note: `${results.length} hit(s)` }
+      const raw = await (awaitWithAbort ? awaitWithAbort(call, ctx.abortCtrl, timeout) : call)
+      const payload = Array.isArray(raw)
+        ? { status: 'completed', reason: '', results: raw, meta: {} }
+        : {
+            status: raw?.status || 'completed',
+            reason: raw?.reason || '',
+            results: raw?.results || [],
+            meta: raw?.meta || {},
+          }
+
+      if (payload.status === 'failed') {
+        throw new Error(payload.reason || 'Web search failed')
+      }
+
+      const results = (payload.results ?? []).map(h => ({ type: 'web', title: h.title, url: h.url, text: h.text }))
+      if (payload.status === 'busy') {
+        const elapsed = payload.meta?.elapsedMs ? ` in ${Math.round(payload.meta.elapsedMs / 1000)}s` : ''
+        return { results, note: `search skipped (crawler busy${elapsed})` }
+      }
+
+      const elapsed = payload.meta?.elapsedMs ? ` in ${Math.round(payload.meta.elapsedMs / 1000)}s` : ''
+      const note = results.length > 0
+        ? `${results.length} hit(s)${elapsed}`
+        : `crawl completed, 0 cleaned hit(s)${elapsed}`
+      return { results, note }
     })
   } catch (_) {}
 
