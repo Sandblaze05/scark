@@ -19,8 +19,11 @@ import {
   complete as webllmComplete,
   streamChat as webllmStreamChat,
   planActions,
+  planToTaskNodes,
   formulateGoal,
 } from './webllm.js'
+import { runTool, registerDefaultAdapters } from './toolRegistry.js'
+import { TaskGraph } from './taskGraph.js'
 
 // ── Constants ─────────────────────────────────────────────────
 const MAX_STEPS  = 6
@@ -418,6 +421,7 @@ export async function runAgentLoop({
   abortCtrl,
   callbacks,
   scark,
+  useTaskGraph = false,
 }) {
   const {
     initializeRoadmap,
@@ -466,13 +470,20 @@ export async function runAgentLoop({
 
   let initialActions = []
   try {
-    const { actions, pageCap } = await planActions(query, mode, conversationHistory)
-    initialActions = actions
-    state.pageCap = pageCap || 2
+    if (useTaskGraph) {
+      const { nodes, pageCap } = await planToTaskNodes(query, mode, conversationHistory)
+      state.pageCap = pageCap || 2
+      // map nodes to a lightweight action view for roadmap UI
+      initialActions = (nodes || []).map(n => ({ tool: n.tool, args: n.args || {}, nodeId: n.id, priority: n.priority }))
+    } else {
+      const { actions, pageCap } = await planActions(query, mode, conversationHistory)
+      initialActions = actions
+      state.pageCap = pageCap || 2
+    }
     throwIfAborted(abortCtrl)
 
     const maxActions = mode === 'research' ? 6 : 3
-    initialActions = actions.slice(0, maxActions)
+    initialActions = initialActions.slice(0, maxActions)
 
     // In ask mode, limit to first web_search
     if (mode === 'ask') {
@@ -542,40 +553,96 @@ export async function runAgentLoop({
       children,
     })
     setStatus(mode === 'research' ? 'Retrieving many docs...' : `Retrieving docs (cap ${state.pageCap})...`)
-
-    // Execute each planned action
-    for (let i = 0; i < initialActions.length; i++) {
-      const action = initialActions[i]
-      throwIfAborted(abortCtrl)
-
-      callbacks.updateChildRoadmapStep?.(retrieveStepId, `retrieve_${i}`, 'in_progress')
-
-      const result = await executeTool(
-        action.tool,
-        action.args,
-        state,
-        scark,
-        awaitWithAbort,
-        abortCtrl,
-      )
-
-      if (result.success) {
-        state.gathered.push(...result.results)
-        callbacks.updateChildRoadmapStep?.(retrieveStepId, `retrieve_${i}`, 'completed', result.note)
-        state.stepLog.push({ action: action.tool, note: result.note })
-      } else {
-        // Record failure for potential rewrite
-        state.failures.push({
-          tool: action.tool,
-          query: action.args?.query || action.args?.url || '',
-          error: result.error,
-        })
-        callbacks.updateChildRoadmapStep?.(retrieveStepId, `retrieve_${i}`, 'failed', result.error)
-        state.stepLog.push({ action: `${action.tool} (failed)`, note: result.error })
+    if (useTaskGraph) {
+      // Build task graph from planned actions
+      // ensure default adapters are registered so runTool can execute common tasks
+      try { registerDefaultAdapters() } catch (e) { /* ignore if already registered */ }
+      const tg = new TaskGraph()
+      for (let i = 0; i < initialActions.length; i++) {
+        const a = initialActions[i]
+        tg.createTaskNode({ id: `retrieve_${i}`, toolId: a.tool, args: a.args, priority: a.priority || 0 })
       }
-      state.stepCount++
+
+      // Execute nodes while there are executable tasks
+      while (true) {
+        throwIfAborted(abortCtrl)
+        const exec = tg.getExecutableNodes()
+        if (!exec || exec.length === 0) break
+
+        for (const node of exec) {
+          // mark active
+          tg.updateTaskNode(node.id, { status: 'active' })
+          callbacks.updateChildRoadmapStep?.(retrieveStepId, node.id, 'in_progress')
+
+          // Try registry-run first, fall back to legacy executeTool
+          let execResult = null
+          try {
+            const runRes = await runTool(node.toolId, { state, scark }, node.args)
+            if (runRes && runRes.success) {
+              execResult = { success: true, results: runRes.result?.results || [], note: runRes.result?.note || '' }
+            } else {
+              // Fallback to legacy
+              execResult = await executeTool(node.toolId, node.args, state, scark, awaitWithAbort, abortCtrl)
+            }
+          } catch (err) {
+            execResult = { success: false, results: [], error: err?.message || String(err) }
+          }
+
+          if (execResult.success) {
+            // merge any returned documents
+            if (Array.isArray(execResult.results) && execResult.results.length > 0) {
+              state.gathered.push(...execResult.results)
+            }
+            tg.markCompleted(node.id, execResult)
+            callbacks.updateChildRoadmapStep?.(retrieveStepId, node.id, 'completed', execResult.note)
+            state.stepLog.push({ action: node.toolId, note: execResult.note })
+          } else {
+            tg.markFailed(node.id, execResult.error || 'failed')
+            state.failures.push({ tool: node.toolId, query: node.args?.query || node.args?.url || '', error: execResult.error })
+            callbacks.updateChildRoadmapStep?.(retrieveStepId, node.id, 'failed', execResult.error)
+            state.stepLog.push({ action: `${node.toolId} (failed)`, note: execResult.error })
+          }
+          state.stepCount++
+        }
+      }
+
+      const st = tg.getState()
+      setRoadmapStep(retrieveStepId, 'completed', `${st.completed.length} source(s) gathered`)
+    } else {
+      // Execute each planned action (legacy path)
+      for (let i = 0; i < initialActions.length; i++) {
+        const action = initialActions[i]
+        throwIfAborted(abortCtrl)
+
+        callbacks.updateChildRoadmapStep?.(retrieveStepId, `retrieve_${i}`, 'in_progress')
+
+        const result = await executeTool(
+          action.tool,
+          action.args,
+          state,
+          scark,
+          awaitWithAbort,
+          abortCtrl,
+        )
+
+        if (result.success) {
+          state.gathered.push(...result.results)
+          callbacks.updateChildRoadmapStep?.(retrieveStepId, `retrieve_${i}`, 'completed', result.note)
+          state.stepLog.push({ action: action.tool, note: result.note })
+        } else {
+          // Record failure for potential rewrite
+          state.failures.push({
+            tool: action.tool,
+            query: action.args?.query || action.args?.url || '',
+            error: result.error,
+          })
+          callbacks.updateChildRoadmapStep?.(retrieveStepId, `retrieve_${i}`, 'failed', result.error)
+          state.stepLog.push({ action: `${action.tool} (failed)`, note: result.error })
+        }
+        state.stepCount++
+      }
+      setRoadmapStep(retrieveStepId, 'completed', `${state.gathered.length} source(s) gathered`)
     }
-    setRoadmapStep(retrieveStepId, 'completed', `${state.gathered.length} source(s) gathered`)
   } else {
     // Ask mode + 0 actions planned
     addRoadmapStep({ id: retrieveStepId, label: 'Retrieve evidence', status: 'skipped', note: 'No tools needed' })

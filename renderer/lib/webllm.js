@@ -340,6 +340,45 @@ export async function planActions(userQuery, mode = 'ask', conversationHistory =
 }
 
 /**
+ * Ask the model to output a structured TaskNode JSON array for a task-graph executor.
+ * Each node: { id?: string, tool: string, args?: object, deps?: string[], priority?: number }
+ */
+export async function planToTaskNodes(userQuery, mode = 'ask', conversationHistory = []) {
+    if (!_s.engine) return { nodes: [], pageCap: 2 };
+
+    const prompt = [
+        {
+            role: 'system',
+            content:
+                'You are a planner for a task-graph executor. Given a user query, output a JSON array (only JSON, no surrounding text) of TaskNode objects. ' +
+                'A TaskNode has the shape: { "id"?: string, "tool": "web_search"|"read_url"|"knowledge_search", "args": {...}, "deps": ["id1",...], "priority": number }.\n' +
+                'Keep ids short and URL-safe. Ensure dependencies reference other node ids if needed. Do NOT include any other fields.'
+        },
+        { role: 'user', content: `User query: ${userQuery}\nMode: ${mode}` }
+    ];
+
+    try {
+        const text = await complete(prompt, { maxTokens: 300 });
+        // Try to parse JSON strictly
+        let parsed = null;
+        try {
+            parsed = JSON.parse(text);
+        } catch (err) {
+            // Attempt to extract JSON block
+            const m = text.match(/([\[\{][\s\S]*[\]\}])/m);
+            if (m) parsed = JSON.parse(m[1]);
+        }
+
+        if (!Array.isArray(parsed)) return { nodes: [], pageCap: 2 };
+        // Normalize nodes
+        const nodes = parsed.map(n => ({ id: n.id, tool: n.tool || n.name || n.toolId, args: n.args || {}, deps: n.deps || [], priority: n.priority || 0 }));
+        return { nodes, pageCap: 2 };
+    } catch (err) {
+        return { nodes: [], pageCap: 2 };
+    }
+}
+
+/**
  * Parse the model's action plan output into structured actions.
  * @param {string} text
  * @returns {{ actions: Array<{ tool: string, args: Record<string, string> }>, pageCap: number }}
