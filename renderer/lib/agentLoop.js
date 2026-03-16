@@ -43,6 +43,8 @@ import { TaskGraph } from './taskGraph.js'
 
 const MAX_STEPS = 14
 const MAX_DRAFT_RETRIES = 2
+const WEB_SEARCH_TIMEOUT_GRACE_MS = 7000
+const WEB_SEARCH_STATUS_POLL_MS = 350
 
 // ── Query sanitizer ────────────────────────────────────────────
 
@@ -60,6 +62,44 @@ function sanitizeSearchQuery(raw) {
 
   const words = cleaned.split(/\s+/)
   return words.length > 10 ? words.slice(0, 10).join(' ') : cleaned
+}
+
+function createWebSearchRequestId() {
+  if (globalThis.crypto?.randomUUID) {
+    return `websearch:${globalThis.crypto.randomUUID()}`
+  }
+  return `websearch:${Date.now()}:${Math.random().toString(36).slice(2, 10)}`
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms))
+}
+
+async function recoverTimedOutWebSearch(requestId, scark, abortCtrl, graceMs = WEB_SEARCH_TIMEOUT_GRACE_MS) {
+  if (!requestId || !scark?.query?.websearchStatus) return null
+
+  const deadline = Date.now() + graceMs
+  while (Date.now() < deadline) {
+    if (abortCtrl?.signal?.aborted) {
+      const abortErr = new Error('Aborted')
+      abortErr.name = 'AbortError'
+      throw abortErr
+    }
+
+    const status = await scark.query.websearchStatus(requestId).catch(() => null)
+    if (!status) {
+      await sleep(WEB_SEARCH_STATUS_POLL_MS)
+      continue
+    }
+
+    if (status.status === 'completed' || status.status === 'failed' || status.status === 'busy' || status.status === 'canceled') {
+      return status.response || { status: status.status, reason: '', results: [], meta: { requestId } }
+    }
+
+    await sleep(WEB_SEARCH_STATUS_POLL_MS)
+  }
+
+  return null
 }
 
 // ── Query rewriter ─────────────────────────────────────────────
@@ -99,11 +139,28 @@ async function executeTool(toolName, args, state, scark, awaitWithAbort, abortCt
       const maxPages = mode === 'research' ? 5 : (state.pageCap || 2)
       const timeout  = mode === 'research' ? 130000 : 70000
       const cleanQuery = sanitizeSearchQuery(args.query)
-      const response = await awaitWithAbort(
-        scark.query.websearch(cleanQuery, maxPages),
-        abortCtrl,
-        timeout,
-      )
+      const requestId = createWebSearchRequestId()
+      let response
+
+      try {
+        response = await awaitWithAbort(
+          scark.query.websearch(cleanQuery, maxPages, requestId),
+          abortCtrl,
+          timeout,
+        )
+      } catch (err) {
+        if (err?.name === 'TimeoutError') {
+          const recovered = await recoverTimedOutWebSearch(requestId, scark, abortCtrl)
+          if (recovered) {
+            response = recovered
+          } else {
+            await scark?.query?.cancelWebsearch?.(requestId).catch(() => null)
+            throw err
+          }
+        } else {
+          throw err
+        }
+      }
 
       const payload = Array.isArray(response)
         ? { status: 'completed', reason: '', results: response, meta: {} }

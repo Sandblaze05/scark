@@ -20,6 +20,7 @@ export class WorkerPool {
     #idle = [];
     #queue = [];
     #queueSeq = 0;
+    #activeByRequestId = new Map();
 
     /**
      * @param {string|URL} workerScript – path to the worker .js file
@@ -59,8 +60,8 @@ export class WorkerPool {
     #drain() {
         while (this.#idle.length > 0 && this.#queue.length > 0) {
             const worker = this.#idle.pop();
-            const { task, resolve, reject } = this.#queue.shift();
-            this.#dispatch(worker, task, resolve, reject);
+            const entry = this.#queue.shift();
+            this.#dispatch(worker, entry);
         }
     }
 
@@ -73,11 +74,15 @@ export class WorkerPool {
         });
     }
 
-    #dispatch(worker, task, resolve, reject) {
+    #dispatch(worker, entry) {
+        const { task, resolve, reject, requestId } = entry;
         const taskId = randomUUID();
+        let settled = false;
 
         const onMessage = (msg) => {
             if (msg.taskId !== taskId) return;
+            if (settled) return;
+            settled = true;
             cleanup();
             this.#idle.push(worker);
             this.#drain();
@@ -86,6 +91,8 @@ export class WorkerPool {
         };
 
         const onError = (err) => {
+            if (settled) return;
+            settled = true;
             cleanup();
             reject(err);
         };
@@ -93,7 +100,17 @@ export class WorkerPool {
         const cleanup = () => {
             worker.off('message', onMessage);
             worker.off('error', onError);
+            if (requestId) this.#activeByRequestId.delete(requestId);
         };
+
+        if (requestId) {
+            this.#activeByRequestId.set(requestId, {
+                worker,
+                reject,
+                cleanup,
+                settle: () => { settled = true; },
+            });
+        }
 
         worker.on('message', onMessage);
         worker.on('error', onError);
@@ -111,19 +128,48 @@ export class WorkerPool {
      */
     exec(task, options = {}) {
         return new Promise((resolve, reject) => {
+            const entry = {
+                task,
+                resolve,
+                reject,
+                requestId: options.requestId,
+                priority: Number.isFinite(options.priority) ? options.priority : 0,
+                seq: this.#queueSeq++,
+            };
             const worker = this.#idle.pop();
             if (worker) {
-                this.#dispatch(worker, task, resolve, reject);
+                this.#dispatch(worker, entry);
             } else {
-                this.#enqueue({
-                    task,
-                    resolve,
-                    reject,
-                    priority: Number.isFinite(options.priority) ? options.priority : 0,
-                    seq: this.#queueSeq++,
-                });
+                this.#enqueue(entry);
             }
         });
+    }
+
+    async cancel(requestId, reason = 'Task cancelled') {
+        if (!requestId) return false;
+
+        const queuedIndex = this.#queue.findIndex(entry => entry.requestId === requestId);
+        if (queuedIndex >= 0) {
+            const [queued] = this.#queue.splice(queuedIndex, 1);
+            queued.reject(new Error(reason));
+            return true;
+        }
+
+        const active = this.#activeByRequestId.get(requestId);
+        if (!active) return false;
+
+        active.settle();
+        active.cleanup();
+        this.#remove(active.worker);
+        try {
+            await active.worker.terminate();
+        } catch {
+            // Ignore termination failures; a replacement worker is still spawned below.
+        }
+        this.#spawn();
+        active.reject(new Error(reason));
+        this.#drain();
+        return true;
     }
 
     /** Pool statistics snapshot */

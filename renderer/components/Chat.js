@@ -2014,12 +2014,12 @@ export default function Chat({ isTemporary, setIsTemporary }) {
                                   try { const urlObj = new URL(href); domain = urlObj.hostname.replace(/^www\./, ''); } catch (e) { domain = href; }
                                   if (isRawUrl) { displayText = domain + (href.length > domain.length + 8 ? '...' : ''); }
                                   return (
-                                    <span className="relative inline-block group mx-1 align-middle">
+                                    <span className="relative inline-block group/link mx-1 align-middle">
                                       <a href={href} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-black/5 dark:bg-white/10 hover:bg-black/10 dark:hover:bg-white/20 text-xs font-sans text-gray-700 dark:text-gray-300 no-underline transition-all ring-1 ring-black/5 dark:ring-white/10">
                                         <Globe className="w-3 h-3 opacity-70 shrink-0" />
                                         <span className="truncate max-w-30">{domain}</span>
                                       </a>
-                                      <span className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-64 p-3 bg-white dark:bg-[#1C1C1C] rounded-xl shadow-xl border border-black/5 dark:border-white/10 opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all duration-200 z-50 text-left font-sans flex flex-col gap-1.5 transform scale-95 group-hover:scale-100 origin-bottom pointer-events-none">
+                                      <span className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-64 p-3 bg-white dark:bg-[#1C1C1C] rounded-xl shadow-xl border border-black/5 dark:border-white/10 opacity-0 invisible group-hover/link:opacity-100 group-hover/link:visible transition-all duration-200 z-50 text-left font-sans flex flex-col gap-1.5 transform scale-95 group-hover/link:scale-100 origin-bottom pointer-events-none">
                                         <span className="flex items-center gap-2 text-xs font-semibold text-gray-700 dark:text-gray-300"><Globe className="w-3.5 h-3.5 opacity-70 shrink-0" /><span className="truncate">{domain}</span></span>
                                         <span className="text-[13px] font-normal text-gray-600 dark:text-gray-400 line-clamp-3 leading-snug break-all">{href}</span>
                                       </span>
@@ -2213,14 +2213,14 @@ export default function Chat({ isTemporary, setIsTemporary }) {
                             }
 
                             return (
-                              <span className="relative inline-block group mx-1 align-middle">
+                              <span className="relative inline-block group/link mx-1 align-middle">
                                 <a href={href} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-black/5 dark:bg-white/10 hover:bg-black/10 dark:hover:bg-white/20 text-xs font-sans text-gray-700 dark:text-gray-300 no-underline transition-all ring-1 ring-black/5 dark:ring-white/10">
                                   <Globe className="w-3 h-3 opacity-70 shrink-0" />
                                   <span className="truncate max-w-30">{domain}</span>
                                 </a>
 
                                 {/* Hover Card */}
-                                <span className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-64 p-3 bg-white dark:bg-[#1C1C1C] rounded-xl shadow-xl border border-black/5 dark:border-white/10 opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all duration-200 z-50 text-left font-sans flex flex-col gap-1.5 transform scale-95 group-hover:scale-100 origin-bottom pointer-events-none">
+                                <span className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-64 p-3 bg-white dark:bg-[#1C1C1C] rounded-xl shadow-xl border border-black/5 dark:border-white/10 opacity-0 invisible group-hover/link:opacity-100 group-hover/link:visible transition-all duration-200 z-50 text-left font-sans flex flex-col gap-1.5 transform scale-95 group-hover/link:scale-100 origin-bottom pointer-events-none">
                                   <span className="flex items-center gap-2 text-xs font-semibold text-gray-700 dark:text-gray-300">
                                     <Globe className="w-3.5 h-3.5 opacity-70 shrink-0" />
                                     <span className="truncate">{domain}</span>

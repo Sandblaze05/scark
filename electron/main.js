@@ -43,6 +43,18 @@ let queryPool;
 const INGESTION_POOL_SIZE = parseInt(process.env.SCARK_INGESTION_POOL_SIZE || '', 10) || (isDev ? 2 : 3);
 const QUERY_POOL_SIZE = parseInt(process.env.SCARK_QUERY_POOL_SIZE || '', 10) || (isDev ? 2 : 2);
 const INTERACTIVE_MAX_QUEUE_DEPTH = parseInt(process.env.SCARK_INTERACTIVE_MAX_QUEUE_DEPTH || '', 10) || 3;
+const WEBSEARCH_RESULT_TTL_MS = 120000;
+const webSearchRequests = new Map();
+
+function scheduleWebSearchCleanup(requestId) {
+    setTimeout(() => {
+        const entry = webSearchRequests.get(requestId);
+        if (!entry) return;
+        if (entry.status === 'completed' || entry.status === 'failed' || entry.status === 'canceled' || entry.status === 'busy') {
+            webSearchRequests.delete(requestId);
+        }
+    }, WEBSEARCH_RESULT_TTL_MS);
+}
 
 function ensureDefaultChat() {
     const chats = listChatSessions();
@@ -337,58 +349,117 @@ function registerIPC() {
     });
 
     // Quick web search – used when the model decides it needs current info in ask mode
-    ipcMain.handle('query:websearch', async (_event, query, maxPages = 3) => {
-        console.log(`[WebSearch] Request: "${query}" (maxPages: ${maxPages})`);
+    ipcMain.handle('query:websearch', async (_event, query, maxPages = 3, requestId) => {
+        const effectiveRequestId = requestId || `websearch:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
+        const existing = webSearchRequests.get(effectiveRequestId);
+        if (existing) {
+            if (existing.response) return existing.response;
+            return existing.promise;
+        }
+
+        console.log(`[WebSearch] Request: "${query}" (maxPages: ${maxPages}, requestId: ${effectiveRequestId})`);
         const pool = getIngestionPool();
         const startedAt = Date.now();
+
+        const makeResponse = (status, reason, results = []) => ({
+            status,
+            reason,
+            results,
+            meta: {
+                query,
+                maxPages,
+                requestId: effectiveRequestId,
+                elapsedMs: Date.now() - startedAt,
+                resultCount: results.length,
+            },
+        });
 
         // Allow a small queue for interactive requests; reject only if queue is saturated.
         if (pool.stats.queued >= INTERACTIVE_MAX_QUEUE_DEPTH) {
             console.warn(`[WebSearch] Queue saturated (${pool.stats.queued}) — rejecting interactive request.`);
-            return {
-                status: 'busy',
-                reason: 'ingestion queue saturated',
-                results: [],
+            const response = {
+                ...makeResponse('busy', 'ingestion queue saturated', []),
                 meta: {
-                    query,
-                    maxPages,
-                    elapsedMs: Date.now() - startedAt,
+                    ...makeResponse('busy', 'ingestion queue saturated', []).meta,
                     pool: pool.stats,
                 },
             };
+            webSearchRequests.set(effectiveRequestId, {
+                requestId: effectiveRequestId,
+                status: 'busy',
+                response,
+                promise: Promise.resolve(response),
+            });
+            scheduleWebSearchCleanup(effectiveRequestId);
+            return response;
         }
 
-        try {
-            const webResults = await pool.exec({
+        const entry = {
+            requestId: effectiveRequestId,
+            status: 'running',
+            response: null,
+            promise: null,
+        };
+        webSearchRequests.set(effectiveRequestId, entry);
+
+        entry.promise = pool.exec({
                 type: 'quickSearch',
                 data: { keyword: query, maxPages },
-            }, { priority: 10 });
-            console.log(`[WebSearch] Completed: ${(webResults ?? []).length} result(s)`);
-            const results = (webResults ?? []).map(p => ({ title: p.title, url: p.url, text: p.text }));
-            return {
-                status: 'completed',
-                reason: '',
-                results,
-                meta: {
-                    query,
-                    maxPages,
-                    elapsedMs: Date.now() - startedAt,
-                    resultCount: results.length,
-                },
-            };
-        } catch (e) {
-            console.warn('[WebSearch] Failed:', e.message);
-            return {
-                status: 'failed',
-                reason: e.message,
-                results: [],
-                meta: {
-                    query,
-                    maxPages,
-                    elapsedMs: Date.now() - startedAt,
-                },
-            };
+            }, { priority: 10, requestId: effectiveRequestId })
+            .then((webResults) => {
+                if (entry.status === 'canceled') return entry.response;
+                console.log(`[WebSearch] Completed: ${(webResults ?? []).length} result(s)`);
+                const results = (webResults ?? []).map(p => ({ title: p.title, url: p.url, text: p.text }));
+                entry.status = 'completed';
+                entry.response = makeResponse('completed', '', results);
+                scheduleWebSearchCleanup(effectiveRequestId);
+                return entry.response;
+            })
+            .catch((e) => {
+                if (entry.status === 'canceled' && entry.response) return entry.response;
+                console.warn('[WebSearch] Failed:', e.message);
+                entry.status = 'failed';
+                entry.response = makeResponse('failed', e.message, []);
+                scheduleWebSearchCleanup(effectiveRequestId);
+                return entry.response;
+            });
+
+        return entry.promise;
+    });
+
+    ipcMain.handle('query:websearchStatus', async (_event, requestId) => {
+        const entry = webSearchRequests.get(requestId);
+        if (!entry) {
+            return { status: 'unknown', requestId, response: null };
         }
+        return {
+            status: entry.status,
+            requestId,
+            response: entry.response,
+        };
+    });
+
+    ipcMain.handle('query:cancelWebsearch', async (_event, requestId) => {
+        const entry = webSearchRequests.get(requestId);
+        if (!entry) return { success: false, status: 'unknown' };
+        if (entry.status !== 'running') {
+            return { success: false, status: entry.status };
+        }
+
+        entry.status = 'canceled';
+        entry.response = {
+            status: 'canceled',
+            reason: 'renderer timeout cancellation',
+            results: [],
+            meta: {
+                requestId,
+                elapsedMs: 0,
+            },
+        };
+
+        const canceled = await getIngestionPool().cancel(requestId, 'renderer timeout cancellation');
+        scheduleWebSearchCleanup(requestId);
+        return { success: canceled, status: canceled ? 'canceled' : 'running' };
     });
 
     // Batched web search – multiple queries, ONE browser launch, shared page budget
