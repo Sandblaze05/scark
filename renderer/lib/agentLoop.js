@@ -64,6 +64,41 @@ function sanitizeSearchQuery(raw) {
   return words.length > 10 ? words.slice(0, 10).join(' ') : cleaned
 }
 
+function isContextDependentFollowUp(text) {
+  const msg = (text || '').trim()
+  if (!msg) return false
+
+  const shortMsg = msg.split(/\s+/).length <= 10
+  const followUpSignals = /\b(it|its|this|that|those|these|they|them|his|her|their|other|alternative|more|else|another|similar|instead|too|also|what about|and what|then what)\b/i
+  return shortMsg && followUpSignals.test(msg)
+}
+
+function buildContextAnchoredQuery(query, conversationHistory = []) {
+  const latest = (query || '').trim()
+  if (!latest) return ''
+  if (!isContextDependentFollowUp(latest)) return latest
+
+  const priorUserTurns = (conversationHistory || [])
+    .filter(m => m?.role === 'user' && typeof m?.content === 'string')
+    .map(m => m.content.trim())
+    .filter(Boolean)
+
+  const previous = priorUserTurns[priorUserTurns.length - 1]
+  if (!previous) return latest
+  return `${previous.slice(0, 140)} - ${latest}`
+}
+
+function buildRecentConversationBlock(messages = [], maxTurns = 6) {
+  const turns = (messages || [])
+    .filter(m => (m?.role === 'user' || m?.role === 'assistant') && typeof m?.content === 'string')
+    .slice(-maxTurns)
+
+  if (turns.length === 0) return 'none'
+  return turns
+    .map(m => `${m.role}: ${m.content.replace(/\s+/g, ' ').trim().slice(0, 220)}`)
+    .join('\n')
+}
+
 function createWebSearchRequestId() {
   if (globalThis.crypto?.randomUUID) {
     return `websearch:${globalThis.crypto.randomUUID()}`
@@ -390,6 +425,10 @@ function buildReasoningPreview(mode, stepLog, sourceCount, reflectionNotes) {
 
 async function deliberate(state, plan, checkpoint) {
   const summary = plan.getSummary()
+  const recentConversation = buildRecentConversationBlock(
+    state.newMessages?.length ? state.newMessages : state.conversationHistory,
+    6,
+  )
 
   const prompts = {
     /**
@@ -404,6 +443,7 @@ async function deliberate(state, plan, checkpoint) {
       'Rules:\n' +
       '- ask mode: 1–2 tasks. research mode: 2–4 tasks.\n' +
       '- trivial queries (greetings, simple math): empty tasks array.\n' +
+      '- if the latest query is a follow-up, resolve references (it/that/his/other/etc.) using recent conversation before writing search queries.\n' +
       '- always sanitize queries to plain keywords, no boolean operators.',
 
     /**
@@ -421,7 +461,9 @@ async function deliberate(state, plan, checkpoint) {
   }
 
   const userContent = [
-    `Query: ${state.query}`,
+    `Query: ${state.queryForPlanning || state.query}`,
+    `Latest user message: ${state.query}`,
+    `Recent conversation:\n${recentConversation}`,
     `Goal: ${state.goal}`,
     `Mode: ${state.mode}`,
     `Steps used: ${state.stepCount}/${MAX_STEPS}`,
@@ -478,11 +520,12 @@ function parseDeliberation(text, checkpoint, state, plan) {
 
 function fallbackDeliberation(state, checkpoint) {
   if (checkpoint === 'start') {
+    const fallbackQuery = sanitizeSearchQuery(state.queryForPlanning || state.query)
     return {
       assessment: 'Fallback: default web search',
       tasks: [{
         toolId: 'web_search',
-        args: { query: sanitizeSearchQuery(state.query) },
+        args: { query: fallbackQuery },
         priority: 5,
       }],
     }
@@ -795,8 +838,10 @@ export async function runAgentLoop({
   // ── Agent state ────────────────────────────────────────────
   const state = {
     query,
+    queryForPlanning: buildContextAnchoredQuery(query, conversationHistory),
     mode,
     goal: 'Standard answer',
+    conversationHistory: Array.isArray(conversationHistory) ? conversationHistory : [],
     newMessages,          // full conversation, passed to LLM executors
     gathered: [],         // accumulated evidence documents
     failures: [],         // { tool, query, error }
@@ -871,11 +916,12 @@ export async function runAgentLoop({
 
   // Safety: if research mode produced no retrieval tasks, force one
   if (plan.nodes.size === 0 && mode === 'research') {
+    const planningQuery = state.queryForPlanning || query
     const kw = sanitizeSearchQuery(
-      query
+      planningQuery
         .replace(/\b(write|generate|create|produce|give me|provide|explain|describe|summarize|use|cite|mention|include|make|an?|the|on|of|about|with|from|for|and|or|in|to|that|this|it|is|are|was|were|be|been|being)\b/gi, ' ')
         .replace(/\s{2,}/g, ' ').trim(),
-    ) || sanitizeSearchQuery(query)
+    ) || sanitizeSearchQuery(planningQuery)
     const node = plan.createTaskNode({ toolId: 'web_search', args: { query: kw }, priority: 5 })
     addRoadmapStep({ id: node.id, label: `Search: "${kw.slice(0, 50)}"`, status: 'pending', note: '' })
     state.stepLog.push({ action: 'Deliberate (start)', note: `forced fallback search: "${kw}"` })

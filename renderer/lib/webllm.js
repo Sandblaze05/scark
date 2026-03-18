@@ -128,13 +128,20 @@ function trimMessages(messages) {
     const system = messages.filter(m => m.role === 'system');
     const turns = messages.filter(m => m.role !== 'system');
 
+    // Ensure we always keep a small number of the most recent turns
+    const MIN_TURNS_TO_KEEP = 4
+
     let budget = getPromptTokenBudget() -
         system.reduce((s, m) => s + estimateTokens(m.content), 0);
 
     const kept = [];
     for (let i = turns.length - 1; i >= 0; i--) {
         const cost = estimateTokens(turns[i].content);
-        if (budget - cost < 0 && kept.length > 0) break; // always keep at least 1
+        // If budget would be exceeded, stop only when we've already
+        // preserved the minimum number of recent turns. This avoids
+        // dropping essential conversational context when the system
+        // prompt is large.
+        if (budget - cost < 0 && kept.length > 0 && kept.length >= MIN_TURNS_TO_KEEP) break;
         kept.unshift(turns[i]);
         budget -= cost;
     }
