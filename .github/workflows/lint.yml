@@ -1,0 +1,23 @@
+on:
+  pull_request:
+  push:
+jobs:
+  lint:
+    name: ESLint + Prettier
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - name: Use Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: 18
+    - name: Install dependencies
+      run: npm ci
+    - name: Run ESLint
+      run: npx eslint . --ext .js || true
+    - name: Run Prettier check
+      run: npx prettier --check "**/*.{js,css,json,md}" || true
+    - name: Fail if linting errors
+      run: |
+        npx eslint . --ext .js
+        npx prettier --check "**/*.{js,css,json,md}"
