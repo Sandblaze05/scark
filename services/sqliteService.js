@@ -52,6 +52,11 @@ function getDb() {
 
         CREATE INDEX IF NOT EXISTS idx_chunks_url ON chunks(url);
 
+        CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
+            id UNINDEXED,
+            text
+        );
+
         CREATE TABLE IF NOT EXISTS chat_sessions (
             id              TEXT    PRIMARY KEY,
             title           TEXT    NOT NULL,
@@ -79,6 +84,16 @@ function getDb() {
         CREATE TABLE IF NOT EXISTS user_profile (
             key   TEXT PRIMARY KEY,
             value TEXT
+        );
+    `);
+
+    // Keep FTS table warm for existing databases.
+    _db.exec(`
+        INSERT INTO chunks_fts (id, text)
+        SELECT c.id, c.text
+        FROM chunks c
+        WHERE NOT EXISTS (
+            SELECT 1 FROM chunks_fts f WHERE f.id = c.id
         );
     `);
 
@@ -116,6 +131,9 @@ export function storeInSQLite(results) {
             (@id, @url, @chunk_index, @word_count, @text, @timestamp)
     `);
 
+    const deleteChunkFts = db.prepare('DELETE FROM chunks_fts WHERE id = ?');
+    const insertChunkFts = db.prepare('INSERT INTO chunks_fts (id, text) VALUES (?, ?)');
+
     let chunkCount = 0;
 
     const insertAll = db.transaction((results) => {
@@ -132,14 +150,17 @@ export function storeInSQLite(results) {
             });
 
             for (const chunk of result.chunks) {
+                const chunkId = `${result.url}::${chunk.chunk_index}`;
                 upsertChunk.run({
-                    id:          `${result.url}::${chunk.chunk_index}`,
+                    id:          chunkId,
                     url:         result.url,
                     chunk_index: chunk.chunk_index,
                     word_count:  chunk.word_count,
                     text:        chunk.text,
                     timestamp:   result.metadata.timestamp,
                 });
+                deleteChunkFts.run(chunkId);
+                insertChunkFts.run(chunkId, chunk.text ?? '');
                 chunkCount++;
             }
         }
@@ -173,6 +194,46 @@ export function getChunksByUrl(url) {
     return getDb()
         .prepare('SELECT * FROM chunks WHERE url = ? ORDER BY chunk_index')
         .all(url);
+}
+
+function toFtsQuery(raw) {
+    const tokens = String(raw || '')
+        .toLowerCase()
+        .split(/[^a-z0-9]+/)
+        .filter((t) => t.length >= 2)
+        .slice(0, 8);
+    if (tokens.length === 0) return '';
+    return tokens.map((t) => `"${t}"`).join(' OR ');
+}
+
+export function searchChunksLexical(query, limit = 8) {
+    const ftsQuery = toFtsQuery(query);
+    if (!ftsQuery) return [];
+
+    const rows = getDb().prepare(`
+        SELECT
+            c.id,
+            c.url,
+            c.text,
+            c.timestamp,
+            p.title,
+            bm25(chunks_fts) AS rank
+        FROM chunks_fts
+        JOIN chunks c ON c.id = chunks_fts.id
+        LEFT JOIN pages p ON p.url = c.url
+        WHERE chunks_fts MATCH ?
+        ORDER BY rank ASC
+        LIMIT ?
+    `).all(ftsQuery, Math.max(1, limit));
+
+    return rows.map((r) => ({
+        id: r.id,
+        title: r.title ?? '',
+        url: r.url,
+        text: r.text ?? '',
+        timestamp: r.timestamp ?? null,
+        rank: r.rank,
+    }));
 }
 
 /**

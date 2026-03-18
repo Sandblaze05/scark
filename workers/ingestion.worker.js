@@ -28,6 +28,52 @@ import { store }                    from '../pipeline/store.js';
 
 chromium.use(StealthPlugin());
 
+// Background vector-store writes are expensive and can destabilize interactive
+// search flows on some Windows/Electron setups. Keep it opt-in.
+const ENABLE_BACKGROUND_STORE = /^(1|true)$/i.test(process.env.SCARK_BACKGROUND_STORE || '0');
+let backgroundStoreChain = Promise.resolve();
+
+function queueBackgroundStore(cleanedPages, sourceLabel) {
+    if (!ENABLE_BACKGROUND_STORE) return;
+    if (!Array.isArray(cleanedPages) || cleanedPages.length === 0) return;
+
+    backgroundStoreChain = backgroundStoreChain
+        .then(async () => {
+            const chunked = chunkPages(cleanedPages, {});
+            await embed(chunked);
+            await store(chunked);
+            console.log(`[Background] Stored ${chunked.length} ${sourceLabel} page(s) to Vector DB.`);
+        })
+        .catch((e) => {
+            console.error(`[Background] Error storing ${sourceLabel} data:`, e);
+        });
+}
+
+function toPromotedCleanedPages(results = []) {
+    return (results || [])
+        .filter((r) => typeof r?.url === 'string' && typeof r?.text === 'string' && r.text.trim().length > 80)
+        .map((r) => {
+            let domain = '';
+            try {
+                domain = new URL(r.url).hostname;
+            } catch {
+                domain = '';
+            }
+            const cleanedText = r.text.replace(/\s+/g, ' ').trim();
+            return {
+                url: r.url,
+                title: r.title || r.url,
+                cleanedText,
+                metadata: {
+                    word_count: cleanedText.split(/\s+/).filter(Boolean).length,
+                    domain,
+                    keyword_density: 0,
+                    timestamp: new Date().toISOString(),
+                },
+            };
+        });
+}
+
 // ── Task handlers (one per pipeline stage) ────────────────
 
 const handlers = {
@@ -112,18 +158,8 @@ const handlers = {
                     keyword,
                 });
                 cleaned = cleanPages(rawPages, { keyword: '' });
-                
-                // Fire and forget: store this in the background for long term memory
-                setTimeout(async () => {
-                    try {
-                        const chunked = chunkPages(cleaned, {});
-                        await embed(chunked);
-                        await store(chunked);
-                        console.log(`[Background] Stored ${chunked.length} pages to Vector DB for long term storage.`);
-                    } catch (e) {
-                        console.error('[Background] Error storing deep research data:', e);
-                    }
-                }, 0);
+
+                queueBackgroundStore(cleaned, 'researchFetch');
             }
             
             return cleaned.map(p => ({
@@ -166,17 +202,7 @@ const handlers = {
 
                 cleaned = cleanPages(rawPages, { keyword: '' });
 
-                // Background store for long term memory
-                setTimeout(async () => {
-                    try {
-                        const chunked = chunkPages(cleaned, {});
-                        await embed(chunked);
-                        await store(chunked);
-                        console.log(`[Background] Stored ${chunked.length} quickSearch pages to Vector DB.`);
-                    } catch (e) {
-                        console.error('[Background] Error storing quickSearch data:', e);
-                    }
-                }, 0);
+                queueBackgroundStore(cleaned, 'quickSearch');
             }
 
             return cleaned.map(p => ({
@@ -231,17 +257,7 @@ const handlers = {
 
             const cleaned = cleanPages(rawPages, { keyword: '' });
 
-            // Background store
-            setTimeout(async () => {
-                try {
-                    const chunked = chunkPages(cleaned, {});
-                    await embed(chunked);
-                    await store(chunked);
-                    console.log(`[Background] Stored ${chunked.length} batchSearch pages to Vector DB.`);
-                } catch (e) {
-                    console.error('[Background] Error storing batchSearch data:', e);
-                }
-            }, 0);
+            queueBackgroundStore(cleaned, 'batchQuickSearch');
 
             return cleaned.map(p => ({
                 title: p.title,
@@ -273,17 +289,7 @@ const handlers = {
             const cleaned = cleanPages(rawPages, { keyword: '' });
             if (cleaned.length === 0) return null;
 
-            // Background store for long-term memory
-            setTimeout(async () => {
-                try {
-                    const chunked = chunkPages(cleaned, {});
-                    await embed(chunked);
-                    await store(chunked);
-                    console.log(`[Background] Stored fetched URL to Vector DB: ${url}`);
-                } catch (e) {
-                    console.error('[Background] Error storing fetched URL:', e);
-                }
-            }, 0);
+            queueBackgroundStore(cleaned, 'fetchUrl');
 
             return {
                 title: cleaned[0].title,
@@ -293,6 +299,19 @@ const handlers = {
         } finally {
             await browser.close();
         }
+    },
+
+    // Index selected web results into long-term RAG stores at low priority.
+    async promoteSearchResults({ results }) {
+        const cleaned = toPromotedCleanedPages(results);
+        if (cleaned.length === 0) {
+            return { promoted: 0, stored: { chroma: 0, sqlite: { pages: 0, chunks: 0 } } };
+        }
+
+        const chunked = chunkPages(cleaned, {});
+        await embed(chunked);
+        const stored = await store(chunked);
+        return { promoted: cleaned.length, stored };
     },
 };
 

@@ -7,9 +7,14 @@
  */
 
 import { app, BrowserWindow, ipcMain, session, clipboard } from 'electron';
+// Load environment overrides early so services/readers pick them up (packaged EXE support)
+import '../lib/envLoader.js';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { WorkerPool } from '../workers/pool.js';
+import ServiceManager from '../lib/ServiceManager.js';
+// ensure chroma launcher registers itself
+import '../services/chromaLauncher.js';
 import { buildSystemPrompt, rewriteQuery, requiresFreshData, requiresSearch } from '../services/chatService.js';
 import {
     addChatMessage,
@@ -45,6 +50,20 @@ const QUERY_POOL_SIZE = parseInt(process.env.SCARK_QUERY_POOL_SIZE || '', 10) ||
 const INTERACTIVE_MAX_QUEUE_DEPTH = parseInt(process.env.SCARK_INTERACTIVE_MAX_QUEUE_DEPTH || '', 10) || 3;
 const WEBSEARCH_RESULT_TTL_MS = 120000;
 const webSearchRequests = new Map();
+const PROMOTION_MIN_HITS = parseInt(process.env.SCARK_PROMOTE_MIN_HITS || '2', 10);
+const PROMOTION_MAX_PAGES = parseInt(process.env.SCARK_PROMOTE_MAX_PAGES || '2', 10);
+const PROMOTION_MIN_TEXT_LEN = parseInt(process.env.SCARK_PROMOTE_MIN_TEXT_LEN || '220', 10);
+const promotionHits = new Map();
+let promotionQueue = Promise.resolve();
+
+function parseAutostartServiceList() {
+    const raw = (process.env.SCARK_SERVICES_AUTOSTART || 'chroma').trim();
+    if (!raw) return [];
+    return raw
+        .split(',')
+        .map((item) => item.trim())
+        .filter(Boolean);
+}
 
 function scheduleWebSearchCleanup(requestId) {
     setTimeout(() => {
@@ -54,6 +73,50 @@ function scheduleWebSearchCleanup(requestId) {
             webSearchRequests.delete(requestId);
         }
     }, WEBSEARCH_RESULT_TTL_MS);
+}
+
+function rankPromotionCandidates(query, results = []) {
+    const q = String(query || '').toLowerCase();
+    const qTokens = q.split(/\s+/).filter(Boolean);
+    const items = [];
+
+    for (const r of results) {
+        if (!r?.url || typeof r?.text !== 'string') continue;
+        if (r.text.trim().length < PROMOTION_MIN_TEXT_LEN) continue;
+
+        const previousHits = promotionHits.get(r.url) || 0;
+        const nextHits = previousHits + 1;
+        promotionHits.set(r.url, nextHits);
+
+        const hay = `${r.title || ''} ${r.text.slice(0, 600)}`.toLowerCase();
+        const overlap = qTokens.reduce((n, t) => n + (hay.includes(t) ? 1 : 0), 0);
+        const score = (nextHits * 10) + overlap;
+
+        items.push({ ...r, score, hits: nextHits });
+    }
+
+    return items
+        .filter((x) => x.hits >= PROMOTION_MIN_HITS)
+        .sort((a, b) => b.score - a.score)
+        .slice(0, Math.max(0, PROMOTION_MAX_PAGES));
+}
+
+function enqueuePromotion(query, results = []) {
+    const candidates = rankPromotionCandidates(query, results);
+    if (candidates.length === 0) return;
+
+    promotionQueue = promotionQueue
+        .then(async () => {
+            const pool = getIngestionPool();
+            await pool.exec({
+                type: 'promoteSearchResults',
+                data: { results: candidates },
+            }, { priority: 1 });
+            console.log(`[WebSearch] Promoted ${candidates.length} result(s) to long-term RAG store.`);
+        })
+        .catch((e) => {
+            console.warn('[WebSearch] Promotion failed:', e?.message || e);
+        });
 }
 
 function ensureDefaultChat() {
@@ -410,6 +473,7 @@ function registerIPC() {
                 if (entry.status === 'canceled') return entry.response;
                 console.log(`[WebSearch] Completed: ${(webResults ?? []).length} result(s)`);
                 const results = (webResults ?? []).map(p => ({ title: p.title, url: p.url, text: p.text }));
+                enqueuePromotion(query, results);
                 entry.status = 'completed';
                 entry.response = makeResponse('completed', '', results);
                 scheduleWebSearchCleanup(effectiveRequestId);
@@ -551,6 +615,16 @@ function registerIPC() {
 app.whenReady().then(async () => {
     registerIPC();
 
+    // Start configured background services.
+    try {
+        const autostartServices = parseAutostartServiceList();
+        if (autostartServices.length > 0) {
+            await ServiceManager.startAll({ include: autostartServices });
+        }
+    } catch (err) {
+        console.warn('[Main] ServiceManager autostart failed:', err?.message || err);
+    }
+
     if (isDev) {
         try {
             await waitForDevServer(DEV_URL);
@@ -574,5 +648,10 @@ app.whenReady().then(async () => {
 app.on('window-all-closed', async () => {
     await ingestionPool?.destroy();
     await queryPool?.destroy();
+    try {
+        await ServiceManager.stopAll();
+    } catch (err) {
+        console.warn('[Main] ServiceManager failed to stop services:', err?.message || err);
+    }
     if (process.platform !== 'darwin') app.quit();
 });

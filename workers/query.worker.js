@@ -12,7 +12,10 @@
 import { parentPort } from 'worker_threads';
 import { embedText } from '../services/embedService.js';
 import { queryChroma as searchChroma } from '../services/chromaService.js';
-import { getChunkById, getPageText } from '../services/sqliteService.js';
+import { getChunkById, getPageText, searchChunksLexical } from '../services/sqliteService.js';
+
+const MIN_LEXICAL_HITS = parseInt(process.env.SCARK_RAG_MIN_LEXICAL_HITS || '3', 10);
+const LEXICAL_LIMIT = parseInt(process.env.SCARK_RAG_LEXICAL_TOPK || '8', 10);
 
 const handlers = {
     /**
@@ -30,16 +33,37 @@ const handlers = {
      * main process can feed into the LLM system prompt.
      */
     async retrieveContext({ query, topK = 5 }) {
-        const queryVec = await embedText(query);
-        console.log(`[QueryWorker] Querying ChromaDB (topK=${topK}, vecLen=${queryVec?.length})`);
-        const chromaResults = await searchChroma(queryVec, topK);
-
         const contextChunks = [];
+        const lexical = searchChunksLexical(query, Math.max(topK, LEXICAL_LIMIT));
+        for (const row of lexical) {
+            contextChunks.push({
+                id: row.id,
+                title: row.title,
+                url: row.url,
+                text: row.text,
+                timestamp: row.timestamp,
+                distance: null,
+                retrieval: 'lexical',
+            });
+        }
+        console.log(`[QueryWorker] SQLite lexical returned ${lexical.length} result(s)`);
+
+        if (lexical.length >= Math.min(topK, MIN_LEXICAL_HITS)) {
+            return contextChunks.slice(0, topK);
+        }
+
+        const neededVector = Math.max(1, topK - contextChunks.length);
+        const queryVec = await embedText(query);
+        console.log(`[QueryWorker] Querying ChromaDB fallback (topK=${neededVector}, vecLen=${queryVec?.length})`);
+        const chromaResults = await searchChroma(queryVec, Math.max(topK, neededVector));
         const ids = chromaResults?.ids?.[0] ?? [];
         console.log(`[QueryWorker] ChromaDB returned ${ids.length} result(s)`);
 
+        const seen = new Set(contextChunks.map((c) => c.id));
+
         for (let i = 0; i < ids.length; i++) {
             const id = ids[i];
+            if (seen.has(id)) continue;
             const chunk = getChunkById(id);
             const page = getPageText(id);
 
@@ -50,10 +74,13 @@ const handlers = {
                 text:      chunk?.text ?? chromaResults.documents[0][i] ?? '',
                 timestamp: chunk?.timestamp ?? null,
                 distance:  chromaResults.distances?.[0]?.[i] ?? null,
+                retrieval: 'vector',
             });
+            seen.add(id);
+            if (contextChunks.length >= topK) break;
         }
 
-        return contextChunks;
+        return contextChunks.slice(0, topK);
     },
 
 };

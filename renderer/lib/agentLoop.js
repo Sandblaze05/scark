@@ -64,6 +64,29 @@ function sanitizeSearchQuery(raw) {
   return words.length > 10 ? words.slice(0, 10).join(' ') : cleaned
 }
 
+function normalizeUrl(raw) {
+  const input = (raw || '').trim()
+  if (!input) return ''
+
+  let candidate = input
+    .replace(/^read\s*:\s*/i, '')
+    .replace(/^url\s*:\s*/i, '')
+    .replace(/[<>'"`]/g, '')
+    .trim()
+
+  if (candidate.startsWith('//')) candidate = `https:${candidate}`
+
+  if (!/^https?:\/\//i.test(candidate) && /^[a-z0-9.-]+\.[a-z]{2,}(?:\/.*)?$/i.test(candidate)) {
+    candidate = `https://${candidate}`
+  }
+
+  try {
+    return new URL(candidate).toString()
+  } catch {
+    return candidate
+  }
+}
+
 function isContextDependentFollowUp(text) {
   const msg = (text || '').trim()
   if (!msg) return false
@@ -97,6 +120,29 @@ function buildRecentConversationBlock(messages = [], maxTurns = 6) {
   return turns
     .map(m => `${m.role}: ${m.content.replace(/\s+/g, ' ').trim().slice(0, 220)}`)
     .join('\n')
+}
+
+function buildShortTermMemoryBlock(shortTermContext = [], maxTurns = 8) {
+  const turns = (shortTermContext || [])
+    .filter(m => (m?.role === 'user' || m?.role === 'assistant') && typeof m?.content === 'string')
+    .slice(-maxTurns)
+
+  if (turns.length === 0) return 'none'
+  return turns
+    .map(m => `${m.role}: ${m.content.replace(/\s+/g, ' ').trim().slice(0, 260)}`)
+    .join('\n')
+}
+
+function buildMemoryPromptPrefix(state) {
+  const shortTerm = buildShortTermMemoryBlock(state.shortTermContext, 8)
+  const midTerm = (state.conversationSummary || '').replace(/\s+/g, ' ').trim()
+
+  return [
+    'Conversation memory:',
+    `Short-term context (recent turns):\n${shortTerm}`,
+    `Mid-term context (rolling summary):\n${midTerm || 'none'}`,
+    'Use this memory to resolve references and preserve continuity. If there is a conflict, trust recent turns over summary.',
+  ].join('\n\n')
 }
 
 function createWebSearchRequestId() {
@@ -237,9 +283,13 @@ async function executeTool(toolName, args, state, scark, awaitWithAbort, abortCt
 
     if (toolName === 'read_url' && scark?.query?.fetchUrl) {
       const timeout = mode === 'research' ? 45000 : 30000
-      const page = await awaitWithAbort(scark.query.fetchUrl(args.url || args.query), abortCtrl, timeout)
+      const targetUrl = normalizeUrl(args.url || args.query)
+      if (!targetUrl || !/^https?:\/\//i.test(targetUrl)) {
+        return { success: false, results: [], error: 'Invalid URL for read_url tool' }
+      }
+      const page = await awaitWithAbort(scark.query.fetchUrl(targetUrl), abortCtrl, timeout)
       if (page?.text) {
-        results.push({ type: 'url', title: page.title || args.url, url: args.url, text: page.text })
+        results.push({ type: 'url', title: page.title || targetUrl, url: targetUrl, text: page.text })
       }
       return { success: true, results, note: page?.text ? 'read' : 'empty' }
     }
@@ -444,6 +494,7 @@ async function deliberate(state, plan, checkpoint) {
       '- ask mode: 1–2 tasks. research mode: 2–4 tasks.\n' +
       '- trivial queries (greetings, simple math): empty tasks array.\n' +
       '- if the latest query is a follow-up, resolve references (it/that/his/other/etc.) using recent conversation before writing search queries.\n' +
+      '- for read_url, args.query MUST be a concrete URL (prefer https://...).\n' +
       '- always sanitize queries to plain keywords, no boolean operators.',
 
     /**
@@ -464,6 +515,7 @@ async function deliberate(state, plan, checkpoint) {
     `Query: ${state.queryForPlanning || state.query}`,
     `Latest user message: ${state.query}`,
     `Recent conversation:\n${recentConversation}`,
+    `Mid-term summary:\n${state.conversationSummary || 'none'}`,
     `Goal: ${state.goal}`,
     `Mode: ${state.mode}`,
     `Steps used: ${state.stepCount}/${MAX_STEPS}`,
@@ -497,7 +549,14 @@ function parseDeliberation(text, checkpoint, state, plan) {
       const valid = new Set(['web_search', 'knowledge_search', 'read_url'])
       const tasks = (parsed.tasks || [])
         .filter(t => valid.has(t.toolId) && t.args?.query)
-        .map(t => ({ ...t, args: { ...t.args, query: sanitizeSearchQuery(t.args.query) } }))
+        .map(t => {
+          const rawQuery = t.args?.query || ''
+          if (t.toolId === 'read_url') {
+            const url = normalizeUrl(rawQuery)
+            return { ...t, args: { ...t.args, url, query: url } }
+          }
+          return { ...t, args: { ...t.args, query: sanitizeSearchQuery(rawQuery) } }
+        })
       return { assessment: parsed.assessment || '', tasks }
     }
 
@@ -590,7 +649,8 @@ async function executeDraft(task, state) {
   const isRetry = Boolean(task.args?.isRetry)
 
   const context = buildSystemPrompt(mode, gathered, '')
-  const fullMessages = [{ role: 'system', content: context.systemPrompt }, ...newMessages]
+  const memoryPrefix = buildMemoryPromptPrefix(state)
+  const fullMessages = [{ role: 'system', content: `${context.systemPrompt}\n\n${memoryPrefix}` }, ...newMessages]
 
   const baseInstruction = goal !== 'Standard answer'
     ? `STRICT FORMAT REQUIREMENT: ${goal}`
@@ -624,7 +684,8 @@ async function executeFinalize(task, state, { callbacks, abortCtrl }) {
   const { mode, gathered, goal, draft, reflectionNotes, newMessages } = state
 
   const context = buildSystemPrompt(mode, gathered, '')
-  const fullMessages = [{ role: 'system', content: context.systemPrompt }, ...newMessages]
+  const memoryPrefix = buildMemoryPromptPrefix(state)
+  const fullMessages = [{ role: 'system', content: `${context.systemPrompt}\n\n${memoryPrefix}` }, ...newMessages]
 
   const finalInstruction = goal !== 'Standard answer'
     ? `STRICT FORMAT REQUIREMENT: ${goal}`
@@ -810,6 +871,8 @@ function taskStatusLabel(task) {
  * @param {'ask'|'research'} opts.mode
  * @param {Array}            opts.conversationHistory
  * @param {Array}            opts.newMessages
+ * @param {string}           [opts.conversationSummary]
+ * @param {Array}            [opts.shortTermContext]
  * @param {AbortController}  opts.abortCtrl
  * @param {object}           opts.callbacks
  * @param {object}           opts.scark
@@ -820,6 +883,8 @@ export async function runAgentLoop({
   mode,
   conversationHistory,
   newMessages,
+  conversationSummary = '',
+  shortTermContext = [],
   abortCtrl,
   callbacks,
   scark,
@@ -841,6 +906,8 @@ export async function runAgentLoop({
     queryForPlanning: buildContextAnchoredQuery(query, conversationHistory),
     mode,
     goal: 'Standard answer',
+    conversationSummary: typeof conversationSummary === 'string' ? conversationSummary.trim() : '',
+    shortTermContext: Array.isArray(shortTermContext) ? shortTermContext : [],
     conversationHistory: Array.isArray(conversationHistory) ? conversationHistory : [],
     newMessages,          // full conversation, passed to LLM executors
     gathered: [],         // accumulated evidence documents

@@ -1319,20 +1319,33 @@ export default function Chat({ isTemporary, setIsTemporary }) {
     }
   }, [])
 
-  const updateRollingSummary = useCallback(async (chatId, userText, assistantText) => {
+  const updateRollingSummary = useCallback(async (chatId, userText, assistantText, shortTermContext = []) => {
     if (!chatId || !assistantText || isTemporary || chatId === 'temp') return
     try {
+      const recentContextText = (shortTermContext || [])
+        .filter(m => (m?.role === 'user' || m?.role === 'assistant') && typeof m?.content === 'string')
+        .slice(-8)
+        .map(m => `${m.role}: ${m.content.replace(/\s+/g, ' ').trim().slice(0, 220)}`)
+        .join('\n') || '(none)'
+
       const nextSummary = await webllmComplete([
         {
           role: 'system',
           content:
-            'Maintain a rolling summary for a chat. Keep it under 120 words. ' +
-            'Capture goals, key facts, decisions, and open items. Return plain text only.',
+            'Maintain structured mid-term memory for a chat. Keep it under 140 words total. ' +
+            'Return exactly these sections as plain text (no markdown):\n' +
+            'Topic: <one line>\n' +
+            'Key facts: <comma-separated facts>\n' +
+            'User preferences: <comma-separated preferences or none>\n' +
+            'Open threads: <comma-separated unresolved items or none>\n' +
+            'Promotion rules: add new items to mid-term memory ONLY if they are durable: repeated in recent turns, explicit user preference/constraint/goal, stable factual identity, or unresolved action item. ' +
+            'Do NOT promote one-off examples, temporary wording, or speculative details. ' +
+            'Rules: preserve still-true facts from current summary, merge promoted facts, remove outdated/contradicted facts, avoid fluff.',
         },
         {
           role: 'user',
           content:
-            `Current summary:\n${chatSummary || '(none)'}\n\nLatest user message:\n${userText}\n\nLatest assistant message:\n${assistantText}`,
+            `Current summary:\n${chatSummary || '(none)'}\n\nRecent short-term context:\n${recentContextText}\n\nLatest user message:\n${userText}\n\nLatest assistant message:\n${assistantText}`,
         },
       ], { maxTokens: 170 })
 
@@ -1629,6 +1642,8 @@ export default function Chat({ isTemporary, setIsTemporary }) {
         mode: queryMode,
         conversationHistory: currentMessages,
         newMessages,
+        conversationSummary: chatSummary,
+        shortTermContext: currentMessages.slice(-8),
         abortCtrl,
         callbacks: agentCallbacks,
         scark: window.scark,
@@ -1667,7 +1682,7 @@ export default function Chat({ isTemporary, setIsTemporary }) {
           console.warn('[Chat] Failed to persist assistant message:', e?.message || e)
         }
 
-        updateRollingSummary(chatId, queryText, finalText)
+        updateRollingSummary(chatId, queryText, finalText, [...newMessages, { role: 'assistant', content: finalText }])
         generateFollowUps(chatId, queryText, finalText)
       }
 

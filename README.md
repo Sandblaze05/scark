@@ -114,6 +114,14 @@ chroma run --path ./chroma-data
 
 If you already have Chroma running elsewhere, set `CHROMA_URL` accordingly.
 
+Scark can also auto-start Chroma in the background via the internal service manager:
+
+```bash
+CHROMA_AUTO_START=1
+CHROMA_CMD=chromadb
+CHROMA_ARGS="run --host 0.0.0.0 --port 8000"
+```
+
 ### Start the app in development
 
 ```bash
@@ -162,6 +170,34 @@ Scark currently uses environment variables for most runtime tuning.
 - `SCARK_CHUNK_OVERLAP`: chunk overlap in words
 - `SCARK_OUTPUT`: output JSON file for CLI pipeline runs
 - `SCARK_DISABLE_HIGH_PERF_GPU=1`: disables forced high-performance GPU selection
+- `SCARK_SERVICES_AUTOSTART`: comma-separated service names to start on app boot. Default: `chroma`
+- `CHROMA_AUTO_START`: set to `1` or `true` to allow the app to spawn Chroma if it is not already running
+- `CHROMA_CMD`: executable used to start Chroma (for example `chromadb` or `python`)
+- `CHROMA_ARGS`: args passed to `CHROMA_CMD` (for example `-m chromadb run --host 0.0.0.0 --port 8000`)
+- `CHROMA_READY_TIMEOUT_MS`: readiness timeout in milliseconds before startup is considered failed
+
+## Packaged EXE and Environment Variables
+
+When Scark is packaged into a Windows `.exe`, environment variables still work the same way, but they must exist in the process environment that launches the app.
+
+Common options:
+
+- Launch from a terminal after setting env vars in that shell session.
+- Set user/system environment variables in Windows so they are always available.
+- Wrap the `.exe` in a small `.bat` launcher that sets variables first, then starts Scark.
+
+Example `.bat` launcher:
+
+```bat
+@echo off
+set CHROMA_AUTO_START=1
+set CHROMA_CMD=chromadb
+set CHROMA_ARGS=run --host 0.0.0.0 --port 8000
+set SCARK_SERVICES_AUTOSTART=chroma
+start "" "C:\Path\To\Scark.exe"
+```
+
+If you run the `.exe` from Explorer without preconfigured environment variables, Scark will use defaults and may skip auto-start depending on your configuration.
 
 ## Data Stored Locally
 

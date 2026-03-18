@@ -10,15 +10,59 @@ import { Zap, MessagesSquare, Sparkles, Sun, Cpu } from 'lucide-react'
 
 export const DEFAULT_MODEL = 'Llama-3.2-3B-Instruct-q4f16_1-MLC';
 
+const DEFAULT_CONTEXT_WINDOW_TOKENS = 4096;
+const DEFAULT_COMPLETION_RESERVE_TOKENS = 900;
+const MIN_PROMPT_BUDGET_TOKENS = 512;
+
+function defineModel({
+    id,
+    name,
+    icon,
+    color,
+    contextWindow = DEFAULT_CONTEXT_WINDOW_TOKENS,
+    completionReserveTokens,
+}) {
+    return {
+        id,
+        name,
+        icon,
+        color,
+        contextWindow,
+        ...(Number.isFinite(completionReserveTokens) ? { completionReserveTokens } : {}),
+    };
+}
+
 // Shared model definitions available for download/use
 export const AVAILABLE_MODELS = [
-    { id: 'Llama-3.2-3B-Instruct-q4f16_1-MLC', name: 'Llama 3.2 3B', icon: Zap, color: 'text-violet-400', contextWindow: 4096 },
-    { id: 'Llama-3.2-1B-Instruct-q4f16_1-MLC', name: 'Llama 3.2 1B', icon: MessagesSquare, color: 'text-emerald-400', contextWindow: 4096 },
-    { id: 'Phi-3.5-mini-instruct-q4f16_1-MLC', name: 'Phi-3.5 Mini', icon: Sparkles, color: 'text-blue-400', contextWindow: 4096 },
-    { id: 'Qwen2.5-1.5B-Instruct-q4f16_1-MLC', name: 'Qwen 1.5B', icon: Sun, color: 'text-orange-400', contextWindow: 8192 },
-    { id: 'Qwen2.5-7B-Instruct-q4f16_1-MLC', name: 'Qwen 2.5 7B', icon: Sun, color: 'text-yellow-400', contextWindow: 8192 },
-    { id: 'gemma-2b-it-q4f16_1-MLC', name: 'Gemma 2B', icon: Cpu, color: 'text-green-400', contextWindow: 4096 },
+    defineModel({ id: 'Llama-3.2-3B-Instruct-q4f16_1-MLC', name: 'Llama 3.2 3B', icon: Zap, color: 'text-violet-400' }),
+    defineModel({ id: 'Llama-3.2-1B-Instruct-q4f16_1-MLC', name: 'Llama 3.2 1B', icon: MessagesSquare, color: 'text-emerald-400' }),
+    defineModel({ id: 'Phi-3.5-mini-instruct-q4f16_1-MLC', name: 'Phi-3.5 Mini', icon: Sparkles, color: 'text-blue-400' }),
+    defineModel({ id: 'Qwen2.5-1.5B-Instruct-q4f16_1-MLC', name: 'Qwen 1.5B', icon: Sun, color: 'text-orange-400', contextWindow: 4096 }),
+    defineModel({ id: 'Qwen2.5-7B-Instruct-q4f16_1-MLC', name: 'Qwen 2.5 7B', icon: Sun, color: 'text-yellow-400', contextWindow: 4096 }),
+    defineModel({ id: 'gemma-2b-it-q4f16_1-MLC', name: 'Gemma 2B', icon: Cpu, color: 'text-green-400' }),
 ];
+
+export function getModelConfig(modelId) {
+    if (!modelId) return null;
+    return AVAILABLE_MODELS.find(m => m.id === modelId) || null;
+}
+
+export function getModelContextWindow(modelId) {
+    return getModelConfig(modelId)?.contextWindow || DEFAULT_CONTEXT_WINDOW_TOKENS;
+}
+
+function getModelCompletionReserveTokens(modelId) {
+    const cfg = getModelConfig(modelId);
+    const windowSize = cfg?.contextWindow || DEFAULT_CONTEXT_WINDOW_TOKENS;
+
+    // Keep enough headroom for completion while scaling with larger windows.
+    const adaptiveReserve = Math.max(
+        DEFAULT_COMPLETION_RESERVE_TOKENS,
+        Math.min(2048, Math.round(windowSize * 0.22))
+    );
+
+    return cfg?.completionReserveTokens || adaptiveReserve;
+}
 
 // Persist engine state on globalThis so HMR module reloads don't destroy an
 // already-loaded engine or create duplicate initialisation.  In production the
@@ -110,11 +154,9 @@ function estimateTokens(text) {
 }
 
 function getPromptTokenBudget() {
-    // If a model is loaded, calculate based on its capacity, otherwise default to 4096 capacity.
-    const model = AVAILABLE_MODELS.find(m => m.id === _s.loadedModel);
-    const windowSize = model?.contextWindow || 4096;
-    // Reserve ~900 tokens for the completion; the remaining is the prompt budget.
-    return windowSize - 900;
+    const windowSize = getModelContextWindow(_s.loadedModel);
+    const reserve = getModelCompletionReserveTokens(_s.loadedModel);
+    return Math.max(MIN_PROMPT_BUDGET_TOKENS, windowSize - reserve);
 }
 
 /**

@@ -55,6 +55,28 @@ function sanitizeSearchQuery(raw) {
   return words.length > 10 ? words.slice(0, 10).join(' ') : cleaned
 }
 
+function normalizeUrl(raw) {
+  const input = (raw || '').trim()
+  if (!input) return ''
+
+  let candidate = input
+    .replace(/^read\s*:\s*/i, '')
+    .replace(/^url\s*:\s*/i, '')
+    .replace(/[<>'"`]/g, '')
+    .trim()
+
+  if (candidate.startsWith('//')) candidate = `https:${candidate}`
+  if (!/^https?:\/\//i.test(candidate) && /^[a-z0-9.-]+\.[a-z]{2,}(?:\/.*)?$/i.test(candidate)) {
+    candidate = `https://${candidate}`
+  }
+
+  try {
+    return new URL(candidate).toString()
+  } catch {
+    return candidate
+  }
+}
+
 /**
  * Register default adapters that forward to the existing `scark` IPC.
  * Runner ctx should include: { state, scark, awaitWithAbort, abortCtrl }
@@ -105,10 +127,14 @@ export function registerDefaultAdapters() {
       const scark = ctx.scark
       const timeout = ctx.state?.mode === 'research' ? 45000 : 30000
       const awaitWithAbort = ctx.awaitWithAbort
-      const call = scark?.query?.fetchUrl ? scark.query.fetchUrl(args.url) : Promise.resolve(null)
+      const targetUrl = normalizeUrl(args.url || args.query)
+      if (!targetUrl || !/^https?:\/\//i.test(targetUrl)) {
+        return { results: [], note: 'invalid_url' }
+      }
+      const call = scark?.query?.fetchUrl ? scark.query.fetchUrl(targetUrl) : Promise.resolve(null)
       const page = await (awaitWithAbort ? awaitWithAbort(call, ctx.abortCtrl, timeout) : call)
       const results = []
-      if (page?.text) results.push({ type: 'url', title: page.title || args.url, url: args.url, text: page.text })
+      if (page?.text) results.push({ type: 'url', title: page.title || targetUrl, url: targetUrl, text: page.text })
       return { results, note: page?.text ? 'read' : 'empty' }
     })
   } catch (_) {}
