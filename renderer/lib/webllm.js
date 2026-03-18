@@ -16,6 +16,7 @@ export const AVAILABLE_MODELS = [
     { id: 'Llama-3.2-1B-Instruct-q4f16_1-MLC', name: 'Llama 3.2 1B', icon: MessagesSquare, color: 'text-emerald-400', contextWindow: 4096 },
     { id: 'Phi-3.5-mini-instruct-q4f16_1-MLC', name: 'Phi-3.5 Mini', icon: Sparkles, color: 'text-blue-400', contextWindow: 4096 },
     { id: 'Qwen2.5-1.5B-Instruct-q4f16_1-MLC', name: 'Qwen 1.5B', icon: Sun, color: 'text-orange-400', contextWindow: 8192 },
+    { id: 'Qwen2.5-7B-Instruct-q4f16_1-MLC', name: 'Qwen 2.5 7B', icon: Sun, color: 'text-yellow-400', contextWindow: 8192 },
     { id: 'gemma-2b-it-q4f16_1-MLC', name: 'Gemma 2B', icon: Cpu, color: 'text-green-400', contextWindow: 4096 },
 ];
 

@@ -106,3 +106,28 @@ body {
     }
 }
 
+/* ── AI Reasoning Timeline ── */
+.timeline-pulse-glow {
+    animation: timeline-pulse 2s ease-in-out infinite;
+}
+
+@keyframes timeline-pulse {
+    0%, 100% {
+        box-shadow: 0 0 4px rgba(167, 139, 250, 0.15);
+        opacity: 0.5;
+    }
+    50% {
+        box-shadow: 0 0 12px rgba(167, 139, 250, 0.4);
+        opacity: 1;
+    }
+}
+
+.timeline-typing-cursor {
+    animation: timeline-blink 0.6s step-end infinite;
+}
+
+@keyframes timeline-blink {
+    0%, 100% { opacity: 1; }
+    50%      { opacity: 0; }
+}
+

@@ -28,7 +28,9 @@ import {
   ArrowRight,
   Wand2,
   ThumbsUp,
-  ThumbsDown
+  ThumbsDown,
+  Brain,
+  FileText,
 } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { cn } from '../lib/utils'
@@ -41,6 +43,7 @@ import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism'
 import { Copy, Check } from 'lucide-react'
 import { initEngine, streamChat as webllmStreamChat, complete as webllmComplete, DEFAULT_MODEL, AVAILABLE_MODELS, checkModelCached } from '../lib/webllm'
 import { runAgentLoop } from '../lib/agentLoop'
+import { ReasoningTimeline } from './timeline'
 
 const CodeBlock = React.memo(function CodeBlock({ language, value }) {
   const [copied, setCopied] = useState(false)
@@ -174,6 +177,105 @@ function FeedbackModal({ onClose, onSubmit }) {
   )
 }
 
+function ReasoningPreview({ text }) {
+  const [open, setOpen] = React.useState(false)
+  if (!text) return null
+
+  // Parse numbered list lines into step objects
+  const lines = text.split('\n')
+  const steps = []
+
+  for (const raw of lines) {
+    const trimmed = raw.trim()
+    if (!trimmed) continue
+    const match = trimmed.match(/^(\d+)\.\s+(.+)$/)
+    if (match) {
+      const content = match[2]
+      // Split on arrow: "label → note"
+      const arrowIdx = content.indexOf('→')
+      const label = arrowIdx >= 0 ? content.slice(0, arrowIdx).trim() : content
+      const note  = arrowIdx >= 0 ? content.slice(arrowIdx + 1).trim() : ''
+      steps.push({ num: parseInt(match[1], 10), label, note })
+    }
+  }
+
+  const IconForLabel = ({ label }) => {
+    const l = label.toLowerCase()
+    const cls = 'w-3.5 h-3.5 text-white/40'
+    if (l.includes('search') || l.includes('web_search')) return <Search className={cls} />
+    if (l.includes('knowledge') || l.includes('retrieve')) return <FileText className={cls} />
+    if (l.includes('deliberat') || l.includes('reflect')) return <Brain className={cls} />
+    if (l.includes('draft') || l.includes('finalize') || l.includes('final')) return <Wand2 className={cls} />
+    if (l.includes('plan') || l.includes('goal') || l.includes('formulate')) return <Sparkles className={cls} />
+    return <FlaskConical className={cls} />
+  }
+
+  return (
+    <div className="mb-3 rounded-xl border border-white/8 bg-[#0d0d0d] overflow-hidden font-sans">
+      {/* Header */}
+      <button
+        onClick={() => setOpen(o => !o)}
+        className="w-full flex items-center justify-between px-4 py-2.5 hover:bg-white/3 transition-colors cursor-pointer"
+      >
+        <div className="flex items-center gap-2">
+          <span className="text-[11px] font-semibold uppercase tracking-widest text-white/30">Reasoning</span>
+          <span className="text-[11px] tabular-nums text-white/20">· {steps.length} steps</span>
+        </div>
+        <motion.span
+          animate={{ rotate: open ? 180 : 0 }}
+          transition={{ duration: 0.2 }}
+          className="text-white/25"
+        >
+          <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+            <path d="M2 4l4 4 4-4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+          </svg>
+        </motion.span>
+      </button>
+
+      {/* Steps */}
+      <AnimatePresence initial={false}>
+        {open && steps.length > 0 && (
+          <motion.div
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: "auto", opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.2, ease: "easeInOut" }}
+            className="overflow-hidden"
+          >
+            <div className="px-3 pb-3 pt-1">
+              {steps.map((step, i) => (
+                <div key={step.num} className="relative flex items-start gap-3 pb-3 last:pb-0">
+                  {/* Vertical connector — runs from bottom of circle to top of next row */}
+                  {i < steps.length - 1 && (
+                    <div className="absolute left-[15px] top-[30px] bottom-0 w-px bg-white/10" />
+                  )}
+                  {/* Node */}
+                  <div className="shrink-0 z-10 flex items-center justify-center w-[30px] h-[30px] rounded-full bg-white/4 border border-white/8">
+                    <IconForLabel label={step.label} />
+                  </div>
+                  {/* Content — vertically centred with the 30px circle */}
+                  <div className="flex-1 min-w-0 flex items-center min-h-[30px]">
+                    <p className="text-[12px] text-white/65 font-mono leading-snug">
+                      <span className="text-white/30 mr-1.5">{step.num}.</span>
+                      <span className="text-white/75">{step.label}</span>
+                      {step.note && (
+                        <>
+                          <span className="text-white/20 mx-1.5">→</span>
+                          <span className="text-white/45">{step.note}</span>
+                        </>
+                      )}
+                    </p>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  )
+}
+
 function useAutoResizeTextarea({ minHeight, maxHeight }) {
   const textareaRef = useRef(null)
 
@@ -276,7 +378,19 @@ function SoundWave({ levels }) {
   )
 }
 
-const AnimatedLogo = React.memo(({ mousePosition, className = '' }) => {
+const AnimatedLogo = React.memo(({ className = '' }) => {
+  const [mousePosition, setMousePosition] = React.useState({ x: 0, y: 0 })
+
+  React.useEffect(() => {
+    const handleMouseMove = (e) => {
+      setMousePosition(prev => {
+        if (prev.x === e.clientX && prev.y === e.clientY) return prev
+        return { x: e.clientX, y: e.clientY }
+      })
+    }
+    window.addEventListener('mousemove', handleMouseMove, { passive: true })
+    return () => window.removeEventListener('mousemove', handleMouseMove)
+  }, [])
   const containerRef = useRef(null)
   const [rect, setRect] = useState(null)
   const [isBlinking, setIsBlinking] = useState(false)
@@ -441,6 +555,49 @@ const StarryIdleBackdrop = React.memo(function StarryIdleBackdrop() {
   )
 })
 
+/**
+ * Convert the existing roadmap step format to timeline step format.
+ * Roadmap: { id, label, status, note, children? }
+ * Timeline: { id, type, title, status, content }
+ */
+function roadmapToTimelineSteps(roadmap) {
+  if (!roadmap || !Array.isArray(roadmap)) return []
+  return roadmap.map(step => {
+    const label = step.label || ''
+    const lowerLabel = label.toLowerCase()
+    let type = 'status'
+    let content = {}
+
+    if (lowerLabel.includes('search') || lowerLabel.includes('retry:')) {
+      type = 'search'
+      const queryMatch = label.match(/["\u201c]([^"\u201d]+)["\u201d]/)
+      content = { queries: queryMatch ? [queryMatch[1]] : [label] }
+    } else if (lowerLabel.includes('read:') || lowerLabel.includes('reading')) {
+      type = 'file'
+      const queryMatch = label.match(/["\u201c]([^"\u201d]+)["\u201d]/)
+      content = {
+        files: [{
+          name: queryMatch ? queryMatch[1] : label.replace(/^Read:\s*/i, ''),
+          successText: step.note || 'Successfully read',
+        }],
+      }
+    } else if (lowerLabel.includes('draft') || lowerLabel.includes('reflection') || lowerLabel.includes('summarize') || lowerLabel.includes('evaluating')) {
+      type = 'reasoning'
+      content = { text: step.note || label, bullets: [], collapsedLines: 3 }
+    } else if (lowerLabel.includes('final answer') || lowerLabel === 'done') {
+      type = 'done'
+      content = { summary: step.note || 'Composing final answer' }
+    } else {
+      content = step.note ? { description: label, result: step.note } : { description: label }
+    }
+
+    const timelineStatus = (step.status === 'completed' || step.status === 'failed' || step.status === 'skipped')
+      ? 'complete' : 'loading'
+
+    return { id: step.id, type, title: label, status: timelineStatus, content }
+  })
+}
+
 export default function Chat({ isTemporary, setIsTemporary }) {
     // Dynamic roadmap state will be built during execution.
 
@@ -450,7 +607,7 @@ export default function Chat({ isTemporary, setIsTemporary }) {
   const [isTyping, setIsTyping] = useState(false)
   const [activeSuggestion, setActiveSuggestion] = useState(-1)
   const [followUpSuggestions, setFollowUpSuggestions] = useState([])
-  const [mousePosition, setMousePosition] = useState({ x: 0, y: 0 })
+
   const { textareaRef, adjustHeight } = useAutoResizeTextarea({ minHeight: 44, maxHeight: 200 })
   const [inputFocused, setInputFocused] = useState(false)
   const [dragActive, setDragActive] = useState(false)
@@ -1045,11 +1202,7 @@ export default function Chat({ isTemporary, setIsTemporary }) {
     }
   };
 
-  useEffect(() => {
-    const handleMouseMove = (e) => setMousePosition({ x: e.clientX, y: e.clientY })
-    window.addEventListener('mousemove', handleMouseMove)
-    return () => window.removeEventListener('mousemove', handleMouseMove)
-  }, [])
+
 
 
 
@@ -1812,7 +1965,7 @@ export default function Chat({ isTemporary, setIsTemporary }) {
             <div className="flex-1 flex flex-col items-center justify-center space-y-4 pt-10">
               <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.2, duration: 0.5 }} className="inline-block text-center">
                 <div className="flex items-center justify-center gap-3 mb-3">
-                  <AnimatedLogo mousePosition={mousePosition} className="mb-0 h-10" />
+                  <AnimatedLogo className="mb-0 h-10" />
                   <span className="text-2xl font-semibold tracking-[0.28em] text-black/70 dark:text-white/70">SCARK</span>
                 </div>
                 <h1 className="text-3xl font-medium tracking-tight bg-clip-text text-transparent bg-linear-to-r dark:from-white/90 dark:to-white/40 from-black/90 to-black/40 pb-1">
@@ -1964,45 +2117,20 @@ export default function Chat({ isTemporary, setIsTemporary }) {
                                   ? JSON.parse(turn.assistantMsg.roadmapSnapshot) 
                                   : turn.assistantMsg.roadmapSnapshot;
                                 return (
-                                  <details className="mb-3 rounded-lg border border-black/10 dark:border-white/10 bg-black/5 dark:bg-white/5 px-3 py-2 font-mono">
-                                    <summary className="cursor-pointer text-xs font-medium text-foreground/70 select-none font-sans">Agent Roadmap</summary>
-                                    <div className="mt-2 text-xs space-y-2">
-                                      {snapshot.map((step, idx) => (
-                                        <div key={step.id} className="flex items-start gap-2 text-foreground/70">
-                                          <span className="w-4 text-center inline-block mt-0.5">
-                                            {step.status === 'completed' ? '✓' : step.status === 'in_progress' ? '◉' : step.status === 'failed' ? '✗' : step.status === 'skipped' ? '–' : '○'}
-                                          </span>
-                                          <div className="flex-1">
-                                            <p className={step.status === 'skipped' || step.status === 'pending' ? 'opacity-60' : ''}>{step.label}</p>
-                                            {step.note ? <p className="text-[11px] text-foreground/50 whitespace-pre-wrap mt-0.5">{step.note}</p> : null}
-                                            {step.children && step.children.length > 0 && (
-                                              <div className="mt-1.5 pl-2 border-l border-black/10 dark:border-white/10 space-y-1.5">
-                                                {step.children.map(child => (
-                                                  <div key={child.id} className="flex items-start gap-2 text-[11px] text-foreground/60">
-                                                    <span className="w-4 text-center inline-block">
-                                                      {child.status === 'completed' ? '✓' : child.status === 'in_progress' ? '◉' : child.status === 'failed' ? '✗' : child.status === 'skipped' ? '–' : '○'}
-                                                    </span>
-                                                    <div className="flex-1">
-                                                      <p className={child.status === 'skipped' || child.status === 'pending' ? 'opacity-70' : ''}>{child.label}</p>
-                                                      {child.note ? <p className="text-[10px] text-foreground/40 whitespace-pre-wrap mt-0.5">{child.note}</p> : null}
-                                                    </div>
-                                                  </div>
-                                                ))}
-                                              </div>
-                                            )}
-                                          </div>
-                                        </div>
-                                      ))}
+                                  <details className="mb-3 rounded-lg border border-black/10 dark:border-white/10 bg-white/2 px-3 py-2">
+                                    <summary className="cursor-pointer text-xs font-medium text-foreground/70 select-none font-sans">Agent Reasoning</summary>
+                                    <div className="mt-2">
+                                      <ReasoningTimeline
+                                        steps={roadmapToTimelineSteps(snapshot)}
+                                        streaming={false}
+                                      />
                                     </div>
                                   </details>
                                 )
                               } catch(e) { return null }
                             })()}
                             {turn.assistantMsg.reasoningPreview ? (
-                              <details className="mb-3 rounded-lg border border-black/10 dark:border-white/10 bg-black/5 dark:bg-white/5 px-3 py-2 font-sans">
-                                <summary className="cursor-pointer text-xs font-medium text-foreground/70 select-none">Reasoning preview</summary>
-                                <pre className="mt-2 whitespace-pre-wrap text-[11px] leading-relaxed text-foreground/65 font-mono">{turn.assistantMsg.reasoningPreview}</pre>
-                              </details>
+                              <ReasoningPreview text={turn.assistantMsg.reasoningPreview} />
                             ) : null}
                             <ReactMarkdown
                               remarkPlugins={[remarkGfm, remarkBreaks, remarkExternalLinks]}
@@ -2148,45 +2276,17 @@ export default function Chat({ isTemporary, setIsTemporary }) {
                     </div>
 
                     {agentRoadmap && (
-                      <div className="rounded-xl border border-black/10 dark:border-white/10 bg-black/5 dark:bg-white/5 p-3 text-xs font-mono space-y-1.5">
-                        <p className="font-semibold text-foreground/80 mb-1">Roadmap</p>
-                        {agentRoadmap.map((step, idx) => (
-                          <div key={step.id} className="flex items-start gap-2 text-foreground/70">
-                            <span className="w-4 text-center inline-block mt-0.5">
-                              {step.status === 'completed' ? '✓' : step.status === 'in_progress' ? '◉' : step.status === 'failed' ? '✗' : step.status === 'skipped' ? '–' : '○'}
-                            </span>
-                            <div className="flex-1">
-                              <p className={step.status === 'skipped' || step.status === 'pending' ? 'opacity-60' : ''}>{step.label}</p>
-                              {step.note ? <p className="text-[11px] text-foreground/50 whitespace-pre-wrap mt-0.5">{step.note}</p> : null}
-                              {step.children && step.children.length > 0 && (
-                                <div className="mt-1.5 pl-2 border-l border-black/10 dark:border-white/10 space-y-1.5">
-                                  {step.children.map(child => (
-                                    <div key={child.id} className="flex items-start gap-2 text-[11px] text-foreground/60">
-                                      <span className="w-4 text-center inline-block">
-                                        {child.status === 'completed' ? '✓' : child.status === 'in_progress' ? '◉' : child.status === 'failed' ? '✗' : child.status === 'skipped' ? '–' : '○'}
-                                      </span>
-                                      <div className="flex-1">
-                                        <p className={child.status === 'skipped' || child.status === 'pending' ? 'opacity-70' : ''}>{child.label}</p>
-                                        {child.note ? <p className="text-[10px] text-foreground/40 whitespace-pre-wrap mt-0.5">{child.note}</p> : null}
-                                      </div>
-                                    </div>
-                                  ))}
-                                </div>
-                              )}
-                            </div>
-                          </div>
-                        ))}
-                      </div>
+                      <ReasoningTimeline
+                        steps={roadmapToTimelineSteps(agentRoadmap)}
+                        streaming={false}
+                      />
                     )}
                   </div>
                 ) : (
                   /* Streaming text view */
                   <div className="space-y-3">
                     {streamingReasoningPreview ? (
-                      <details className="rounded-lg border border-black/10 dark:border-white/10 bg-black/5 dark:bg-white/5 px-3 py-2 font-sans">
-                        <summary className="cursor-pointer text-xs font-medium text-foreground/70 select-none">Reasoning preview</summary>
-                        <pre className="mt-2 whitespace-pre-wrap text-[11px] leading-relaxed text-foreground/65 font-mono">{streamingReasoningPreview}</pre>
-                      </details>
+                      <ReasoningPreview text={streamingReasoningPreview} />
                     ) : null}
 
                     <article
