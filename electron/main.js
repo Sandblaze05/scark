@@ -7,6 +7,7 @@
  */
 
 import { app, BrowserWindow, ipcMain, session, clipboard } from 'electron';
+
 // Load environment overrides early so services/readers pick them up (packaged EXE support)
 import '../lib/envLoader.js';
 import path from 'path';
@@ -49,7 +50,7 @@ const INGESTION_POOL_SIZE = parseInt(process.env.SCARK_INGESTION_POOL_SIZE || ''
 const QUERY_POOL_SIZE = parseInt(process.env.SCARK_QUERY_POOL_SIZE || '', 10) || (isDev ? 2 : 2);
 const INTERACTIVE_MAX_QUEUE_DEPTH = parseInt(process.env.SCARK_INTERACTIVE_MAX_QUEUE_DEPTH || '', 10) || 3;
 const WEBSEARCH_RESULT_TTL_MS = 120000;
-const webSearchRequests = new Map();
+const asyncTasks = new Map();
 const PROMOTION_MIN_HITS = parseInt(process.env.SCARK_PROMOTE_MIN_HITS || '2', 10);
 const PROMOTION_MAX_PAGES = parseInt(process.env.SCARK_PROMOTE_MAX_PAGES || '2', 10);
 const PROMOTION_MIN_TEXT_LEN = parseInt(process.env.SCARK_PROMOTE_MIN_TEXT_LEN || '220', 10);
@@ -65,12 +66,12 @@ function parseAutostartServiceList() {
         .filter(Boolean);
 }
 
-function scheduleWebSearchCleanup(requestId) {
+function scheduleTaskCleanup(requestId) {
     setTimeout(() => {
-        const entry = webSearchRequests.get(requestId);
+        const entry = asyncTasks.get(requestId);
         if (!entry) return;
         if (entry.status === 'completed' || entry.status === 'failed' || entry.status === 'canceled' || entry.status === 'busy') {
-            webSearchRequests.delete(requestId);
+            asyncTasks.delete(requestId);
         }
     }, WEBSEARCH_RESULT_TTL_MS);
 }
@@ -296,8 +297,20 @@ function registerIPC() {
 
     // Chat: retrieve RAG context only - LLM streaming is handled by WebLLM in the renderer
     // mode: 'ask' (lightweight) or 'research' (full pipeline when needed)
-    ipcMain.handle('query:context', async (event, { messages, chatId, topK, mode }) => {
+    ipcMain.handle('query:context', async (event, { messages, chatId, topK, mode, requestId }) => {
         const RELEVANCE_THRESHOLD = 0.45;
+        
+        let promiseResolve, promiseReject;
+        const contextPromise = new Promise((res, rej) => { promiseResolve = res; promiseReject = rej; });
+        
+        if (requestId) {
+            asyncTasks.set(requestId, {
+                requestId,
+                status: 'running',
+                response: null,
+                promise: contextPromise,
+            });
+        }
 
         try {
             const lastUserMsg = [...messages].reverse().find(m => m.role === 'user');
@@ -342,7 +355,7 @@ function registerIPC() {
                         contextChunks = await getQueryPool().exec({
                             type: 'retrieveContext',
                             data: { query: searchQuery, topK: k },
-                        }, { priority: 8 }) ?? [];
+                        }, { priority: 8, requestId }) ?? [];
                         console.log('[Context] ChromaDB returned', contextChunks.length, 'chunk(s)');
                     } catch (e) {
                         console.warn('[Context] ChromaDB retrieval failed:', e.message);
@@ -356,7 +369,7 @@ function registerIPC() {
                         const webResults = await getIngestionPool().exec({
                             type: 'researchFetch',
                             data: { keyword: searchQuery, maxPages: 5 },
-                        }, { priority: 5 });
+                        }, { priority: 5, requestId });
                         contextChunks = webResults.map(p => ({ id: p.url, title: p.title, url: p.url, text: p.text, distance: null }));
                     } catch (e) {
                         console.warn('[Context] Research fetch failed:', e.message);
@@ -377,7 +390,7 @@ function registerIPC() {
                         const allChunks = await getQueryPool().exec({
                             type: 'retrieveContext',
                             data: { query: searchQuery, topK: k },
-                        }, { priority: 8 }) ?? [];
+                        }, { priority: 8, requestId }) ?? [];
                         contextChunks = allChunks.filter(c => c.distance != null && c.distance < RELEVANCE_THRESHOLD);
                         console.log('[Context] Ask mode — ChromaDB relevant chunks:', contextChunks.length);
                     } catch (e) {
@@ -392,15 +405,37 @@ function registerIPC() {
             event.sender.send('chat:status', '');
             const systemPrompt = buildSystemPrompt(contextChunks);
 
-            return {
+            const finalRes = {
                 success: true,
                 systemPrompt,
                 sources: contextChunks.map(c => ({ title: c.title, url: c.url })),
             };
+            
+            if (requestId) {
+                const entry = asyncTasks.get(requestId);
+                if (entry && entry.status !== 'canceled') {
+                    entry.status = 'completed';
+                    entry.response = finalRes;
+                }
+                scheduleTaskCleanup(requestId);
+            }
+            promiseResolve(finalRes);
+            return finalRes;
         } catch (err) {
             console.error('[Context] Error:', err?.message || err);
             event.sender.send('chat:error', err?.message || String(err));
-            return { success: false, error: err?.message || String(err) };
+            
+            const errRes = { success: false, error: err?.message || String(err) };
+            if (requestId) {
+                const entry = asyncTasks.get(requestId);
+                if (entry && entry.status !== 'canceled') {
+                    entry.status = 'failed';
+                    entry.response = errRes;
+                }
+                scheduleTaskCleanup(requestId);
+            }
+            promiseResolve(errRes); // resolve so waiters don't hang on rejected promise errors if they expect standard returns
+            return errRes;
         }
     });
 
@@ -414,7 +449,7 @@ function registerIPC() {
     // Quick web search – used when the model decides it needs current info in ask mode
     ipcMain.handle('query:websearch', async (_event, query, maxPages = 3, requestId) => {
         const effectiveRequestId = requestId || `websearch:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
-        const existing = webSearchRequests.get(effectiveRequestId);
+        const existing = asyncTasks.get(effectiveRequestId);
         if (existing) {
             if (existing.response) return existing.response;
             return existing.promise;
@@ -447,13 +482,13 @@ function registerIPC() {
                     pool: pool.stats,
                 },
             };
-            webSearchRequests.set(effectiveRequestId, {
+            asyncTasks.set(effectiveRequestId, {
                 requestId: effectiveRequestId,
                 status: 'busy',
                 response,
                 promise: Promise.resolve(response),
             });
-            scheduleWebSearchCleanup(effectiveRequestId);
+            scheduleTaskCleanup(effectiveRequestId);
             return response;
         }
 
@@ -463,7 +498,7 @@ function registerIPC() {
             response: null,
             promise: null,
         };
-        webSearchRequests.set(effectiveRequestId, entry);
+        asyncTasks.set(effectiveRequestId, entry);
 
         entry.promise = pool.exec({
                 type: 'quickSearch',
@@ -476,7 +511,7 @@ function registerIPC() {
                 enqueuePromotion(query, results);
                 entry.status = 'completed';
                 entry.response = makeResponse('completed', '', results);
-                scheduleWebSearchCleanup(effectiveRequestId);
+                scheduleTaskCleanup(effectiveRequestId);
                 return entry.response;
             })
             .catch((e) => {
@@ -484,15 +519,15 @@ function registerIPC() {
                 console.warn('[WebSearch] Failed:', e.message);
                 entry.status = 'failed';
                 entry.response = makeResponse('failed', e.message, []);
-                scheduleWebSearchCleanup(effectiveRequestId);
+                scheduleTaskCleanup(effectiveRequestId);
                 return entry.response;
             });
 
         return entry.promise;
     });
 
-    ipcMain.handle('query:websearchStatus', async (_event, requestId) => {
-        const entry = webSearchRequests.get(requestId);
+    ipcMain.handle('query:taskStatus', async (_event, requestId) => {
+        const entry = asyncTasks.get(requestId);
         if (!entry) {
             return { status: 'unknown', requestId, response: null };
         }
@@ -503,8 +538,8 @@ function registerIPC() {
         };
     });
 
-    ipcMain.handle('query:cancelWebsearch', async (_event, requestId) => {
-        const entry = webSearchRequests.get(requestId);
+    ipcMain.handle('query:cancelTask', async (_event, requestId) => {
+        const entry = asyncTasks.get(requestId);
         if (!entry) return { success: false, status: 'unknown' };
         if (entry.status !== 'running') {
             return { success: false, status: entry.status };
@@ -521,8 +556,11 @@ function registerIPC() {
             },
         };
 
-        const canceled = await getIngestionPool().cancel(requestId, 'renderer timeout cancellation');
-        scheduleWebSearchCleanup(requestId);
+        const canceledIngestion = await getIngestionPool().cancel(requestId, 'renderer timeout cancellation');
+        const canceledQuery = await getQueryPool().cancel(requestId, 'renderer timeout cancellation');
+        const canceled = canceledIngestion || canceledQuery;
+        
+        scheduleTaskCleanup(requestId);
         return { success: canceled, status: canceled ? 'canceled' : 'running' };
     });
 
@@ -581,17 +619,43 @@ function registerIPC() {
     });
 
     // Fetch a specific URL – used when the model decides to read a user-provided source
-    ipcMain.handle('query:fetchUrl', async (_event, url) => {
-        try {
-            const result = await getIngestionPool().exec({
-                type: 'fetchUrl',
-                data: { url },
-            }, { priority: 9 });
-            return result ?? null;
-        } catch (e) {
-            console.warn('[FetchUrl] Failed:', e.message);
-            return null;
+    ipcMain.handle('query:fetchUrl', async (_event, url, requestId) => {
+        const effectiveRequestId = requestId || `fetch:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
+        const existing = asyncTasks.get(effectiveRequestId);
+        if (existing) {
+            if (existing.response) return existing.response;
+            return existing.promise;
         }
+
+        const entry = {
+            requestId: effectiveRequestId,
+            status: 'running',
+            response: null,
+            promise: null,
+        };
+        asyncTasks.set(effectiveRequestId, entry);
+
+        entry.promise = getIngestionPool().exec({
+            type: 'fetchUrl',
+            data: { url },
+        }, { priority: 9, requestId: effectiveRequestId })
+        .then((result) => {
+            if (entry.status === 'canceled') return entry.response;
+            entry.status = 'completed';
+            entry.response = result ?? null;
+            scheduleTaskCleanup(effectiveRequestId);
+            return entry.response;
+        })
+        .catch((e) => {
+            if (entry.status === 'canceled' && entry.response) return entry.response;
+            console.warn('[FetchUrl] Failed:', e.message);
+            entry.status = 'failed';
+            entry.response = { success: false, error: e.message };
+            scheduleTaskCleanup(effectiveRequestId);
+            return entry.response;
+        });
+
+        return entry.promise;
     });
 
     // Worker pool stats

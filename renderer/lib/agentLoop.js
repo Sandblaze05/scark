@@ -45,6 +45,8 @@ const MAX_STEPS = 14
 const MAX_DRAFT_RETRIES = 2
 const WEB_SEARCH_TIMEOUT_GRACE_MS = 7000
 const WEB_SEARCH_STATUS_POLL_MS = 350
+const TASK_TIMEOUT_GRACE_MS = 7000
+const TASK_STATUS_POLL_MS = 350
 
 // ── Query sanitizer ────────────────────────────────────────────
 
@@ -145,19 +147,8 @@ function buildMemoryPromptPrefix(state) {
   ].join('\n\n')
 }
 
-function createWebSearchRequestId() {
-  if (globalThis.crypto?.randomUUID) {
-    return `websearch:${globalThis.crypto.randomUUID()}`
-  }
-  return `websearch:${Date.now()}:${Math.random().toString(36).slice(2, 10)}`
-}
-
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms))
-}
-
-async function recoverTimedOutWebSearch(requestId, scark, abortCtrl, graceMs = WEB_SEARCH_TIMEOUT_GRACE_MS) {
-  if (!requestId || !scark?.query?.websearchStatus) return null
+export async function recoverTimedOutTask(requestId, scark, abortCtrl, graceMs = TASK_TIMEOUT_GRACE_MS) {
+  if (!requestId || !scark?.query?.taskStatus) return null
 
   const deadline = Date.now() + graceMs
   while (Date.now() < deadline) {
@@ -167,9 +158,9 @@ async function recoverTimedOutWebSearch(requestId, scark, abortCtrl, graceMs = W
       throw abortErr
     }
 
-    const status = await scark.query.websearchStatus(requestId).catch(() => null)
+    const status = await scark.query.taskStatus(requestId).catch(() => null)
     if (!status) {
-      await sleep(WEB_SEARCH_STATUS_POLL_MS)
+      await sleep(TASK_STATUS_POLL_MS)
       continue
     }
 
@@ -177,7 +168,7 @@ async function recoverTimedOutWebSearch(requestId, scark, abortCtrl, graceMs = W
       return status.response || { status: status.status, reason: '', results: [], meta: { requestId } }
     }
 
-    await sleep(WEB_SEARCH_STATUS_POLL_MS)
+    await sleep(TASK_STATUS_POLL_MS)
   }
 
   return null
@@ -209,135 +200,7 @@ async function rewriteFailedQuery(originalQuery, errorMsg) {
   return sanitizeSearchQuery(rewritten || originalQuery.split(' ').slice(0, 4).join(' '))
 }
 
-// ── Tool execution ─────────────────────────────────────────────
-
-async function executeTool(toolName, args, state, scark, awaitWithAbort, abortCtrl) {
-  const mode = state.mode
-  const results = []
-
-  try {
-    if (toolName === 'web_search' && scark?.query?.websearch) {
-      const maxPages = mode === 'research' ? 5 : (state.pageCap || 2)
-      const timeout  = mode === 'research' ? 130000 : 70000
-      const cleanQuery = sanitizeSearchQuery(args.query)
-      const requestId = createWebSearchRequestId()
-      let response
-
-      try {
-        response = await awaitWithAbort(
-          scark.query.websearch(cleanQuery, maxPages, requestId),
-          abortCtrl,
-          timeout,
-        )
-      } catch (err) {
-        if (err?.name === 'TimeoutError') {
-          const recovered = await recoverTimedOutWebSearch(requestId, scark, abortCtrl)
-          if (recovered) {
-            response = recovered
-          } else {
-            await scark?.query?.cancelWebsearch?.(requestId).catch(() => null)
-            throw err
-          }
-        } else {
-          throw err
-        }
-      }
-
-      const payload = Array.isArray(response)
-        ? { status: 'completed', reason: '', results: response, meta: {} }
-        : {
-            status: response?.status || 'completed',
-            reason: response?.reason || '',
-            results: response?.results || [],
-            meta: response?.meta || {},
-          }
-
-      const hits = Array.isArray(payload.results) ? payload.results : []
-      for (const h of (hits ?? [])) {
-        results.push({ type: 'web', title: h.title, url: h.url, text: h.text })
-      }
-
-      if (payload.status === 'failed') {
-        return {
-          success: false,
-          results: [],
-          error: payload.reason || 'Web search failed',
-        }
-      }
-
-      if (payload.status === 'busy') {
-        const elapsed = payload.meta?.elapsedMs ? ` in ${Math.round(payload.meta.elapsedMs / 1000)}s` : ''
-        return {
-          success: true,
-          results,
-          note: `search skipped (crawler busy${elapsed})`,
-        }
-      }
-
-      const elapsed = payload.meta?.elapsedMs ? ` in ${Math.round(payload.meta.elapsedMs / 1000)}s` : ''
-      const completionNote = results.length > 0
-        ? `${results.length} hit(s)${elapsed}`
-        : `crawl completed, 0 cleaned hit(s)${elapsed}`
-      return { success: true, results, note: completionNote }
-    }
-
-    if (toolName === 'read_url' && scark?.query?.fetchUrl) {
-      const timeout = mode === 'research' ? 45000 : 30000
-      const targetUrl = normalizeUrl(args.url || args.query)
-      if (!targetUrl || !/^https?:\/\//i.test(targetUrl)) {
-        return { success: false, results: [], error: 'Invalid URL for read_url tool' }
-      }
-      const page = await awaitWithAbort(scark.query.fetchUrl(targetUrl), abortCtrl, timeout)
-      if (page?.text) {
-        results.push({ type: 'url', title: page.title || targetUrl, url: targetUrl, text: page.text })
-      }
-      return { success: true, results, note: page?.text ? 'read' : 'empty' }
-    }
-
-    if (toolName === 'knowledge_search' && scark?.chat?.getContext) {
-      const topK    = mode === 'research' ? 8 : 5
-      const timeout = mode === 'research' ? 20000 : 15000
-      const kbCtx = await awaitWithAbort(
-        scark.chat.getContext({
-          messages: [{ role: 'user', content: args.query }],
-          topK,
-          mode: 'ask',
-        }),
-        abortCtrl,
-        timeout,
-      ).catch(() => null)
-
-      if (kbCtx?.success) {
-        for (const s of (kbCtx.sources ?? [])) {
-          results.push({ type: 'knowledge', title: s.title, url: s.url, text: '' })
-        }
-        if (kbCtx.systemPrompt) {
-          results.push({ type: 'knowledge_prompt', title: 'Knowledge context', url: '', text: kbCtx.systemPrompt })
-        }
-        return { success: true, results, note: `${kbCtx.sources?.length || 0} KB match(es)` }
-      }
-      return { success: true, results, note: '0 KB matches' }
-    }
-
-    // Registered tool registry fallback
-    try {
-      registerDefaultAdapters()
-    } catch { /* already registered */ }
-    const runRes = await runTool(toolName, { state, scark }, args)
-    if (runRes?.success) {
-      return { success: true, results: runRes.result?.results || [], note: runRes.result?.note || '' }
-    }
-
-    return { success: false, results: [], error: `Unknown tool: ${toolName}` }
-  } catch (err) {
-    if (err?.name === 'AbortError') throw err
-    return {
-      success: false,
-      results: [],
-      error: err?.name === 'TimeoutError' ? 'Timed out' : (err?.message || 'Error'),
-    }
-  }
-}
+// (executeTool and tool execution was migrated to toolRegistry.js)
 
 // ── System prompt builder ──────────────────────────────────────
 
@@ -1135,7 +998,12 @@ export async function runAgentLoop({
         result = await executeFinalize(task, state, { callbacks, abortCtrl })
         finalResult = result
       } else if (isRegisteredTool(task.toolId)) {
-        result = await executeTool(task.toolId, task.args, state, scark, awaitWithAbort, abortCtrl)
+        const runRes = await runTool(task.toolId, { state, scark, awaitWithAbort, abortCtrl, recover: recoverTimedOutTask }, task.args)
+        if (runRes?.success) {
+          result = { success: true, results: runRes.result?.results || [], note: runRes.result?.note || '' }
+        } else {
+          result = { success: false, results: [], error: runRes?.error || `Unknown tool error: ${task.toolId}` }
+        }
       } else {
         result = { success: false, error: `Unknown task: ${task.toolId}` }
       }

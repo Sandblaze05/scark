@@ -137,9 +137,25 @@ export function registerDefaultAdapters() {
       const timeout = mode === 'research' ? 130000 : 70000
       const cleanQuery = sanitizeSearchQuery(args.query || '')
       const awaitWithAbort = ctx.awaitWithAbort
+      const requestId = `websearch:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`
 
-      const call = scark?.query?.websearch ? scark.query.websearch(cleanQuery, maxPages) : Promise.resolve([])
-      const raw = await (awaitWithAbort ? awaitWithAbort(call, ctx.abortCtrl, timeout) : call)
+      const call = scark?.query?.websearch ? scark.query.websearch(cleanQuery, maxPages, requestId) : Promise.resolve([])
+      let raw
+      try {
+        raw = await (awaitWithAbort ? awaitWithAbort(call, ctx.abortCtrl, timeout) : call)
+      } catch (err) {
+        if (err?.name === 'TimeoutError' && ctx.recover) {
+          const recovered = await ctx.recover(requestId, scark, ctx.abortCtrl)
+          if (recovered) {
+            raw = recovered
+          } else {
+            await scark?.query?.cancelTask?.(requestId).catch(() => null)
+            throw err
+          }
+        } else {
+          throw err
+        }
+      }
       const payload = Array.isArray(raw)
         ? { status: 'completed', reason: '', results: raw, meta: {} }
         : {
@@ -185,8 +201,26 @@ export function registerDefaultAdapters() {
       if (!targetUrl || !/^https?:\/\//i.test(targetUrl)) {
         return { results: [], note: 'invalid_url' }
       }
-      const call = scark?.query?.fetchUrl ? scark.query.fetchUrl(targetUrl) : Promise.resolve(null)
-      const page = await (awaitWithAbort ? awaitWithAbort(call, ctx.abortCtrl, timeout) : call)
+      
+      const requestId = `fetch:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`
+      const call = scark?.query?.fetchUrl ? scark.query.fetchUrl(targetUrl, requestId) : Promise.resolve(null)
+      
+      let page
+      try {
+        page = await (awaitWithAbort ? awaitWithAbort(call, ctx.abortCtrl, timeout) : call)
+      } catch (err) {
+        if (err?.name === 'TimeoutError' && ctx.recover) {
+          const recovered = await ctx.recover(requestId, scark, ctx.abortCtrl)
+          if (recovered) {
+            page = recovered
+          } else {
+            await scark?.query?.cancelTask?.(requestId).catch(() => null)
+            throw err
+          }
+        } else {
+          throw err
+        }
+      }
       const results = []
       if (page?.text) results.push({ type: 'url', title: page.title || targetUrl, url: targetUrl, text: page.text })
       return { results, note: page?.text ? 'read' : 'empty' }
@@ -208,8 +242,26 @@ export function registerDefaultAdapters() {
       const topK = ctx.state?.mode === 'research' ? 8 : 5
       const timeout = ctx.state?.mode === 'research' ? 20000 : 15000
       const awaitWithAbort = ctx.awaitWithAbort
-      const call = scark?.chat?.getContext ? scark.chat.getContext({ messages: [{ role: 'user', content: args.query }], topK, mode: 'ask' }) : Promise.resolve({ success: false })
-      const kbCtx = await (awaitWithAbort ? awaitWithAbort(call, ctx.abortCtrl, timeout) : call).catch(() => null)
+      const requestId = `context:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`
+
+      const call = scark?.chat?.getContext ? scark.chat.getContext({ messages: [{ role: 'user', content: args.query }], topK, mode: 'ask', requestId }) : Promise.resolve({ success: false })
+      
+      let kbCtx
+      try {
+        kbCtx = await (awaitWithAbort ? awaitWithAbort(call, ctx.abortCtrl, timeout) : call)
+      } catch (err) {
+        if (err?.name === 'TimeoutError' && ctx.recover) {
+          const recovered = await ctx.recover(requestId, scark, ctx.abortCtrl)
+          if (recovered && recovered.success !== false) {
+            kbCtx = recovered
+          } else {
+            await scark?.query?.cancelTask?.(requestId).catch(() => null)
+            kbCtx = { success: false }
+          }
+        } else {
+          kbCtx = null
+        }
+      }
       const results = []
       if (kbCtx?.success) {
         for (const s of (kbCtx.sources ?? [])) {

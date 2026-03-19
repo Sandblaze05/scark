@@ -23,17 +23,17 @@ contextBridge.exposeInMainWorld('scark', {
         /** Quick web search triggered when the model requests current information */
         websearch: (query, maxPages, requestId) => ipcRenderer.invoke('query:websearch', query, maxPages, requestId),
 
-        /** Get current status for an in-flight web search request */
-        websearchStatus: (requestId) => ipcRenderer.invoke('query:websearchStatus', requestId),
+        /** Get current status for an in-flight async task */
+        taskStatus: (requestId) => ipcRenderer.invoke('query:taskStatus', requestId),
 
-        /** Cancel an in-flight web search request */
-        cancelWebsearch: (requestId) => ipcRenderer.invoke('query:cancelWebsearch', requestId),
+        /** Cancel an in-flight async task */
+        cancelTask: (requestId) => ipcRenderer.invoke('query:cancelTask', requestId),
 
         /** Batched web search: multiple queries, one browser, shared page budget */
         batchWebsearch: (queries, maxTotalPages) => ipcRenderer.invoke('query:batchWebsearch', queries, maxTotalPages),
 
         /** Fetch and read a specific URL (returns { title, text } or null) */
-        fetchUrl: (url) => ipcRenderer.invoke('query:fetchUrl', url),
+        fetchUrl: (url, requestId) => ipcRenderer.invoke('query:fetchUrl', url, requestId),
     },
 
     chat: {
