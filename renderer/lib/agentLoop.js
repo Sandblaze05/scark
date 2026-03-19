@@ -36,7 +36,7 @@ import {
   streamChat as webllmStreamChat,
   formulateGoal,
 } from './webllm.js'
-import { runTool, registerDefaultAdapters } from './toolRegistry.js'
+import { runTool, registerDefaultAdapters, listTools, isRegisteredTool, getToolCategory, getRetrievalToolIds, getToolStatusLabel, getToolRoadmapLabel, isRetryable } from './toolRegistry.js'
 import { TaskGraph } from './taskGraph.js'
 
 // ── Constants ──────────────────────────────────────────────────
@@ -474,11 +474,17 @@ function buildReasoningPreview(mode, stepLog, sourceCount, reflectionNotes) {
 // not by the LLM — keeping the prompt small and reliable.
 
 async function deliberate(state, plan, checkpoint) {
+  try { registerDefaultAdapters() } catch {}
+  
   const summary = plan.getSummary()
   const recentConversation = buildRecentConversationBlock(
     state.newMessages?.length ? state.newMessages : state.conversationHistory,
     6,
   )
+
+  const tools = listTools()
+  const toolDefs = tools.map(t => `${t.id} (${t.name}: ${t.description})`).join('\n  - ')
+  const toolIds = tools.map(t => t.id).join('|')
 
   const prompts = {
     /**
@@ -486,13 +492,14 @@ async function deliberate(state, plan, checkpoint) {
      * Output: { assessment, tasks: [{ toolId, args: { query }, priority }] }
      */
     start:
-      'You are a planning agent deciding which tools to run to gather evidence.\n\n' +
-      'Available tools: web_search (current/factual info), knowledge_search (local KB), read_url (specific URL).\n\n' +
+      'You are a planning agent deciding which tools to run to gather evidence or context.\n\n' +
+      `Available tools:\n  - ${toolDefs}\n\n` +
       'Output ONLY valid JSON — no markdown, no commentary:\n' +
-      '{ "assessment": "<1 sentence>", "tasks": [ { "toolId": "web_search"|"knowledge_search"|"read_url", "args": { "query": "..." }, "priority": <1-10> } ] }\n\n' +
+      `{ "assessment": "<1 sentence>", "tasks": [ { "toolId": "${toolIds}", "args": { "query": "..." }, "priority": <1-10> } ] }\n\n` +
       'Rules:\n' +
       '- ask mode: 1–2 tasks. research mode: 2–4 tasks.\n' +
       '- trivial queries (greetings, simple math): empty tasks array.\n' +
+      '- IMPORTANT: If the user asks about their own identity, name, profile, or preferences (e.g. "who am i", "what is my name", "my settings"), use get_user_settings — do NOT use web_search for personal identity questions.\n' +
       '- if the latest query is a follow-up, resolve references (it/that/his/other/etc.) using recent conversation before writing search queries.\n' +
       '- for read_url, args.query MUST be a concrete URL (prefer https://...).\n' +
       '- always sanitize queries to plain keywords, no boolean operators.',
@@ -519,7 +526,9 @@ async function deliberate(state, plan, checkpoint) {
     `Goal: ${state.goal}`,
     `Mode: ${state.mode}`,
     `Steps used: ${state.stepCount}/${MAX_STEPS}`,
-    `Evidence gathered: ${state.gathered.length} doc(s)`,
+    state.gathered.length > 0
+      ? `Evidence gathered:\n${state.gathered.map((g, i) => `  ${i + 1}. [${g.type}] ${g.title || 'Untitled'}`).join('\n')}`
+      : 'Evidence gathered: none',
     checkpoint === 'post_retrieve'
       ? `Completed tasks: ${JSON.stringify(summary.completed)}\nFailed tasks: ${JSON.stringify(summary.failed)}`
       : '',
@@ -546,16 +555,20 @@ function parseDeliberation(text, checkpoint, state, plan) {
     const parsed = JSON.parse(cleaned)
 
     if (checkpoint === 'start') {
-      const valid = new Set(['web_search', 'knowledge_search', 'read_url'])
+      try { registerDefaultAdapters() } catch {}
+      const valid = new Set(listTools().map(t => t.id))
       const tasks = (parsed.tasks || [])
-        .filter(t => valid.has(t.toolId) && t.args?.query)
+        .filter(t => valid.has(t.toolId) && (t.args?.query || t.args?.url || Object.keys(t.args || {}).length >= 0)) // Just allow args to be there
         .map(t => {
           const rawQuery = t.args?.query || ''
           if (t.toolId === 'read_url') {
             const url = normalizeUrl(rawQuery)
             return { ...t, args: { ...t.args, url, query: url } }
           }
-          return { ...t, args: { ...t.args, query: sanitizeSearchQuery(rawQuery) } }
+          if (['web_search', 'knowledge_search'].includes(t.toolId)) {
+            return { ...t, args: { ...t.args, query: sanitizeSearchQuery(rawQuery) } }
+          }
+          return t
         })
       return { assessment: parsed.assessment || '', tasks }
     }
@@ -579,7 +592,19 @@ function parseDeliberation(text, checkpoint, state, plan) {
 
 function fallbackDeliberation(state, checkpoint) {
   if (checkpoint === 'start') {
-    const fallbackQuery = sanitizeSearchQuery(state.queryForPlanning || state.query)
+    const raw = (state.queryForPlanning || state.query || '').toLowerCase().trim()
+    // Identity / profile queries should use get_user_settings, not web search
+    if (/\b(who am i|what('?s| is) my name|my (settings|profile|preferences))\b/i.test(raw)) {
+      return {
+        assessment: 'Fallback: user identity query → get_user_settings',
+        tasks: [{
+          toolId: 'get_user_settings',
+          args: {},
+          priority: 8,
+        }],
+      }
+    }
+    const fallbackQuery = sanitizeSearchQuery(raw)
     return {
       assessment: 'Fallback: default web search',
       tasks: [{
@@ -601,7 +626,7 @@ function fallbackDeliberation(state, checkpoint) {
  */
 function scheduleDraft(plan, args = {}) {
   const retrievalDeps = plan
-    .getNodesByTool(['web_search', 'read_url', 'knowledge_search', 'summarize'])
+    .getNodesByTool([...getRetrievalToolIds(), 'summarize'])
     .filter(n => n.status !== 'failed')
     .map(n => n.id)
   return plan.createTaskNode({ toolId: 'draft', args, priority: 7, deps: retrievalDeps })
@@ -610,7 +635,7 @@ function scheduleDraft(plan, args = {}) {
 /** Schedule a summarize node that depends on all non-failed retrieval nodes. */
 function scheduleSummarize(plan) {
   const retrievalDeps = plan
-    .getNodesByTool(['web_search', 'read_url', 'knowledge_search'])
+    .getNodesByTool(getRetrievalToolIds())
     .filter(n => n.status !== 'failed')
     .map(n => n.id)
   return plan.createTaskNode({ toolId: 'summarize', args: {}, priority: 6, deps: retrievalDeps })
@@ -747,11 +772,18 @@ function handleTaskCompletion(task, result, state, plan, callbacks) {
   const { addRoadmapStep } = callbacks
 
   switch (task.toolId) {
-    case 'web_search':
-    case 'read_url':
-    case 'knowledge_search':
+    case 'summarize':
+    case 'draft':
+    case 'reflect':
+    case 'finalize':
+      break // handled below in their own case blocks
+    default:
+      // Any registered tool: merge results into gathered evidence
       if (Array.isArray(result.results)) state.gathered.push(...result.results)
-      break
+      return // skip the rest of the switch
+  }
+
+  switch (task.toolId) {
 
     case 'summarize':
       if (result.summary) {
@@ -835,10 +867,10 @@ function handleTaskFailure(task, errorMsg, state, plan) {
   state.failures.push({ tool: task.toolId, query: task.args?.query || '', error: errorMsg })
   state.stepLog.push({ action: `${task.toolId} (failed)`, note: errorMsg })
 
-  const isRetrieval = ['web_search', 'read_url', 'knowledge_search'].includes(task.toolId)
+  const isRetrievable = isRetryable(task.toolId)
   const alreadyRetried = Boolean(task.args?._isRetry)
 
-  if (isRetrieval && !alreadyRetried && state.stepCount < MAX_STEPS - 2) {
+  if (isRetrievable && !alreadyRetried && state.stepCount < MAX_STEPS - 2) {
     // Queue an async rewrite for the next loop iteration
     state._pendingRetries = state._pendingRetries || []
     state._pendingRetries.push({ originalTask: task, error: errorMsg })
@@ -848,17 +880,15 @@ function handleTaskFailure(task, errorMsg, state, plan) {
 // ── Status label helper ────────────────────────────────────────
 
 function taskStatusLabel(task) {
-  const q = (task.args?.query || task.args?.url || '').slice(0, 50)
+  // Internal agent tasks have fixed labels
   switch (task.toolId) {
-    case 'web_search':        return `Searching: "${q}"...`
-    case 'read_url':          return `Reading: ${q}...`
-    case 'knowledge_search':  return `Searching KB: "${q}"...`
-    case 'summarize':         return 'Summarizing evidence...'
-    case 'draft':             return task.args?.isRetry ? 'Improving draft...' : 'Drafting answer...'
-    case 'reflect':           return 'Evaluating draft...'
-    case 'finalize':          return 'Composing final answer...'
-    default:                  return `Running ${task.toolId}...`
+    case 'summarize':  return 'Summarizing evidence...'
+    case 'draft':      return task.args?.isRetry ? 'Improving draft...' : 'Drafting answer...'
+    case 'reflect':    return 'Evaluating draft...'
+    case 'finalize':   return 'Composing final answer...'
   }
+  // Registered tools: use manifest-provided statusLabel
+  return getToolStatusLabel(task.toolId, task.args || {})
 }
 
 // ── Main agent loop ────────────────────────────────────────────
@@ -941,7 +971,7 @@ export async function runAgentLoop({
     scark?.chat?.getContext?.({
       messages: newMessages,
       topK: mode === 'research' ? 8 : 5,
-      mode,
+      mode: 'ask', // Force 'ask' mode so this NEVER triggers a background web search
     }),
     abortCtrl,
     mode === 'research' ? 20000 : 15000,
@@ -968,9 +998,7 @@ export async function runAgentLoop({
 
     for (const t of tasks) {
       const node = plan.createTaskNode({ toolId: t.toolId, args: t.args, priority: t.priority || 5 })
-      const label = t.toolId === 'web_search'       ? `Search: "${(t.args.query || '').slice(0, 50)}"`
-                  : t.toolId === 'read_url'          ? `Read: "${(t.args.query || '').slice(0, 50)}"`
-                  :                                    `Search KB: "${(t.args.query || '').slice(0, 50)}"`
+      const label = getToolRoadmapLabel(t.toolId, t.args || {})
       addRoadmapStep({ id: node.id, label, status: 'pending', note: '' })
     }
 
@@ -1097,9 +1125,7 @@ export async function runAgentLoop({
     try {
       let result
 
-      if (['web_search', 'read_url', 'knowledge_search'].includes(task.toolId)) {
-        result = await executeTool(task.toolId, task.args, state, scark, awaitWithAbort, abortCtrl)
-      } else if (task.toolId === 'summarize') {
+      if (task.toolId === 'summarize') {
         result = await executeSummarize(task, state)
       } else if (task.toolId === 'draft') {
         result = await executeDraft(task, state)
@@ -1108,6 +1134,8 @@ export async function runAgentLoop({
       } else if (task.toolId === 'finalize') {
         result = await executeFinalize(task, state, { callbacks, abortCtrl })
         finalResult = result
+      } else if (isRegisteredTool(task.toolId)) {
+        result = await executeTool(task.toolId, task.args, state, scark, awaitWithAbort, abortCtrl)
       } else {
         result = { success: false, error: `Unknown task: ${task.toolId}` }
       }

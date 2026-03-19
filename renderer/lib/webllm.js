@@ -7,6 +7,7 @@
 
 import * as webllm from '@mlc-ai/web-llm';
 import { Zap, MessagesSquare, Sparkles, Sun, Cpu } from 'lucide-react'
+import { listTools, registerDefaultAdapters } from './toolRegistry.js';
 
 export const DEFAULT_MODEL = 'Llama-3.2-3B-Instruct-q4f16_1-MLC';
 
@@ -327,6 +328,10 @@ export async function planActions(userQuery, mode = 'ask', conversationHistory =
             '\n';
     }
 
+    try { registerDefaultAdapters() } catch {}
+    const tools = listTools()
+    const toolDefs = tools.map(t => `  ${t.id}(args) – ${t.name}: ${t.description}`).join('\n')
+
     const planMessages = [
         {
             role: 'system',
@@ -334,9 +339,7 @@ export async function planActions(userQuery, mode = 'ask', conversationHistory =
                 'You are a tool-planning agent. Given a user question and optional conversation history, decide which tools (if any) would help answer it.\n' +
                 'IMPORTANT: If the user\'s latest message is a follow-up (e.g. "any alternatives?", "tell me more", "what about X?"), you MUST use the conversation history to understand the actual topic, then write search queries about THAT topic. Never invent an unrelated topic.\n\n' +
                 'Available tools:\n' +
-                '  web_search(query)       – search the internet. Use when the question needs current, real-time, or factual data you are unsure about.\n' +
-                '  read_url(url)           – fetch a specific webpage. Use when the user mentions a specific website, link, source, or documentation.\n' +
-                '  knowledge_search(query) – search locally stored knowledge. Use when the user asks about something that may have been researched before.\n' +
+                toolDefs + '\n' +
                 '  none                    – no tools needed. Use when your training knowledge is sufficient.\n\n' +
                 modeRules + '\n\n' +
                 'Rules:\n' +
@@ -345,6 +348,7 @@ export async function planActions(userQuery, mode = 'ask', conversationHistory =
                 '- For read_url: extract the exact URL from the user message.\n' +
                 '- For knowledge_search: write a concise search phrase.\n' +
                 '- You may combine tools (e.g. knowledge_search + web_search).\n' +
+                '- IMPORTANT: If the user asks about their own identity, name, profile, or preferences (e.g. "who am i", "what is my name", "my settings"), use get_user_settings — do NOT use web_search.\n' +
                 '- IMPORTANT: If the user asks you to "write", "summarize", "analyze", or "explain" a topic, you MUST use web_search to find evidence first. Never output "none" for these tasks.\n' +
                 '- Always output exactly one line starting with "page_cap: N", where N is 1, 2, or 3 based on evidence depth needed.\n' +
                 '  - Use page_cap: 1 for single-source quick facts (weather, exchange rate, price-like lookups).\n' +
@@ -375,7 +379,13 @@ export async function planActions(userQuery, mode = 'ask', conversationHistory =
                 'User: "any other alternatives?"\n' +
                 'page_cap: 2\n' +
                 'web_search: Go TUI library alternatives\n' +
-                'knowledge_search: Go terminal UI frameworks' +
+                'knowledge_search: Go terminal UI frameworks\n\n' +
+                'User: "who am i"\n' +
+                'page_cap: 1\n' +
+                'get_user_settings: identity\n\n' +
+                'User: "what is my name"\n' +
+                'page_cap: 1\n' +
+                'get_user_settings: name' +
                 historyBlock,
         },
         { role: 'user', content: userQuery },
@@ -396,12 +406,15 @@ export async function planActions(userQuery, mode = 'ask', conversationHistory =
 export async function planToTaskNodes(userQuery, mode = 'ask', conversationHistory = []) {
     if (!_s.engine) return { nodes: [], pageCap: 2 };
 
+    try { registerDefaultAdapters() } catch {}
+    const toolIds = listTools().map(t => t.id).join('|')
+
     const prompt = [
         {
             role: 'system',
             content:
                 'You are a planner for a task-graph executor. Given a user query, output a JSON array (only JSON, no surrounding text) of TaskNode objects. ' +
-                'A TaskNode has the shape: { "id"?: string, "tool": "web_search"|"read_url"|"knowledge_search", "args": {...}, "deps": ["id1",...], "priority": number }.\n' +
+                `A TaskNode has the shape: { "id"?: string, "tool": "${toolIds}", "args": {...}, "deps": ["id1",...], "priority": number }.\n` +
                 'Keep ids short and URL-safe. Ensure dependencies reference other node ids if needed. Do NOT include any other fields.'
         },
         { role: 'user', content: `User query: ${userQuery}\nMode: ${mode}` }
@@ -449,8 +462,13 @@ function parseActionPlan(text) {
             continue;
         }
 
+        try { registerDefaultAdapters() } catch {}
+        const validToolIds = listTools().map(t => t.id)
+        const patternStr = '^(' + validToolIds.join('|') + '):\\s*(.+)$'
+        const dynamicMatcher = new RegExp(patternStr, 'i')
+
         // Match "tool_name: argument"
-        const match = clean.match(/^(web_search|read_url|knowledge_search):\s*(.+)$/i);
+        const match = clean.match(dynamicMatcher);
         if (match) {
             const tool = match[1].toLowerCase();
             const arg = match[2].trim();
@@ -459,9 +477,7 @@ function parseActionPlan(text) {
                 if (/^https?:\/\//i.test(arg)) {
                     actions.push({ tool, args: { url: arg } });
                 }
-            } else if (tool === 'web_search') {
-                actions.push({ tool, args: { query: arg } });
-            } else if (tool === 'knowledge_search') {
+            } else {
                 actions.push({ tool, args: { query: arg } });
             }
         }

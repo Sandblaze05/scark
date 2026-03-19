@@ -28,15 +28,53 @@ export function listTools() {
   return Array.from(registry.values()).map(e => e.manifest);
 }
 
-export async function runTool(id, ctx = {}, args = {}) {
-  const entry = getTool(id);
-  try {
-    const result = await entry.runner(ctx, args);
-    return { success: true, result };
-  } catch (err) {
-    return { success: false, error: err?.message || String(err) };
-  }
+// ── Registry helpers ─────────────────────────────────────────
+
+/** Check whether a tool with the given id is registered. */
+export function isRegisteredTool(id) {
+  return registry.has(id);
 }
+
+/** Return the category of a registered tool ('retrieval' | 'utility' | 'unknown'). */
+export function getToolCategory(id) {
+  return registry.get(id)?.manifest?.category || 'unknown';
+}
+
+/** Return all registered tool IDs whose category is 'retrieval'. */
+export function getRetrievalToolIds() {
+  return Array.from(registry.values())
+    .filter(e => e.manifest.category === 'retrieval')
+    .map(e => e.manifest.id);
+}
+
+/** Return the status label for a running tool (shown in the UI). */
+export function getToolStatusLabel(id, args = {}) {
+  const m = registry.get(id)?.manifest;
+  if (!m) return `Running ${id}...`;
+  if (typeof m.statusLabel === 'function') return m.statusLabel(args);
+  if (typeof m.statusLabel === 'string') return m.statusLabel;
+  const q = (args.query || args.url || '').slice(0, 50);
+  return q ? `${m.name}: "${q}"...` : `Running ${m.name}...`;
+}
+
+/** Return the roadmap step label for a tool (shown in the plan UI). */
+export function getToolRoadmapLabel(id, args = {}) {
+  const m = registry.get(id)?.manifest;
+  if (!m) return id;
+  if (typeof m.roadmapLabel === 'function') return m.roadmapLabel(args);
+  if (typeof m.roadmapLabel === 'string') return m.roadmapLabel;
+  const q = (args.query || args.url || '').slice(0, 50);
+  return q ? `${m.name}: "${q}"` : m.name;
+}
+
+/** Return whether a tool supports rewrite-retry on failure. */
+export function isRetryable(id) {
+  const m = registry.get(id)?.manifest;
+  if (!m) return false;
+  return m.retryable === true;
+}
+
+// ── Shared utilities ───────────────────────────────────────────
 
 // Simple sanitiser for search queries
 function sanitizeSearchQuery(raw) {
@@ -84,7 +122,15 @@ function normalizeUrl(raw) {
 export function registerDefaultAdapters() {
   // web_search
   try {
-    registerTool({ id: 'web_search', name: 'Web Search', description: 'Search the web and return hits' }, async (ctx = {}, args = {}) => {
+    registerTool({
+      id: 'web_search',
+      name: 'Web Search',
+      description: 'Search the web and return hits',
+      category: 'retrieval',
+      retryable: true,
+      statusLabel: (args) => `Searching: "${(args.query || '').slice(0, 50)}"...`,
+      roadmapLabel: (args) => `Search: "${(args.query || '').slice(0, 50)}"`,
+    }, async (ctx = {}, args = {}) => {
       const scark = ctx.scark
       const mode = ctx.state?.mode || 'ask'
       const maxPages = mode === 'research' ? 5 : (ctx.state?.pageCap || 2)
@@ -97,11 +143,11 @@ export function registerDefaultAdapters() {
       const payload = Array.isArray(raw)
         ? { status: 'completed', reason: '', results: raw, meta: {} }
         : {
-            status: raw?.status || 'completed',
-            reason: raw?.reason || '',
-            results: raw?.results || [],
-            meta: raw?.meta || {},
-          }
+          status: raw?.status || 'completed',
+          reason: raw?.reason || '',
+          results: raw?.results || [],
+          meta: raw?.meta || {},
+        }
 
       if (payload.status === 'failed') {
         throw new Error(payload.reason || 'Web search failed')
@@ -119,11 +165,19 @@ export function registerDefaultAdapters() {
         : `crawl completed, 0 cleaned hit(s)${elapsed}`
       return { results, note }
     })
-  } catch (_) {}
+  } catch (_) { }
 
   // read_url
   try {
-    registerTool({ id: 'read_url', name: 'Read URL', description: 'Fetch and read a specific URL' }, async (ctx = {}, args = {}) => {
+    registerTool({
+      id: 'read_url',
+      name: 'Read URL',
+      description: 'Fetch and read a specific URL',
+      category: 'retrieval',
+      retryable: true,
+      statusLabel: (args) => `Reading: ${(args.url || args.query || '').slice(0, 50)}...`,
+      roadmapLabel: (args) => `Read: "${(args.url || args.query || '').slice(0, 50)}"`,
+    }, async (ctx = {}, args = {}) => {
       const scark = ctx.scark
       const timeout = ctx.state?.mode === 'research' ? 45000 : 30000
       const awaitWithAbort = ctx.awaitWithAbort
@@ -137,11 +191,19 @@ export function registerDefaultAdapters() {
       if (page?.text) results.push({ type: 'url', title: page.title || targetUrl, url: targetUrl, text: page.text })
       return { results, note: page?.text ? 'read' : 'empty' }
     })
-  } catch (_) {}
+  } catch (_) { }
 
   // knowledge_search
   try {
-    registerTool({ id: 'knowledge_search', name: 'Knowledge Search', description: 'Search local knowledge base (Chroma/SQLite) for context' }, async (ctx = {}, args = {}) => {
+    registerTool({
+      id: 'knowledge_search',
+      name: 'Knowledge Search',
+      description: 'Search local knowledge base (Chroma/SQLite) for context',
+      category: 'retrieval',
+      retryable: true,
+      statusLabel: (args) => `Searching KB: "${(args.query || '').slice(0, 50)}"...`,
+      roadmapLabel: (args) => `Search KB: "${(args.query || '').slice(0, 50)}"`,
+    }, async (ctx = {}, args = {}) => {
       const scark = ctx.scark
       const topK = ctx.state?.mode === 'research' ? 8 : 5
       const timeout = ctx.state?.mode === 'research' ? 20000 : 15000
@@ -157,5 +219,45 @@ export function registerDefaultAdapters() {
       }
       return { results, note: `${kbCtx?.sources?.length || 0} KB matches` }
     })
-  } catch (_) {}
+  } catch (_) { }
+
+  // get_user_settings
+  try {
+    registerTool({
+      id: 'get_user_settings',
+      name: 'Get User Settings',
+      description: 'Retrieve the user\'s profile and preferences to customize responses',
+      category: 'utility',
+      retryable: false,
+      statusLabel: 'Loading user profile...',
+      roadmapLabel: 'Load user profile',
+    }, async (ctx = {}, args = {}) => {
+      const scark = ctx.scark
+      const call = scark?.profile?.get ? scark.profile.get() : Promise.resolve(null)
+      const profile = await call
+      if (!profile) return { results: [], note: 'No profile found' }
+
+      // Format profile into readable text so buildSystemPrompt includes it
+      const lines = Object.entries(profile)
+        .filter(([, v]) => v != null && v !== '')
+        .map(([k, v]) => `${k}: ${v}`)
+      const text = lines.length > 0
+        ? `User profile:\n${lines.join('\n')}`
+        : 'User profile: (empty)'
+
+      const results = [{ type: 'settings', title: 'User Profile', url: '', text }]
+      console.log(results);
+      return { results, note: 'Profile loaded' }
+    })
+  } catch (_) { }
+}
+
+export async function runTool(id, ctx = {}, args = {}) {
+  const entry = getTool(id);
+  try {
+    const result = await entry.runner(ctx, args);
+    return { success: true, result };
+  } catch (err) {
+    return { success: false, error: err?.message || String(err) };
+  }
 }
