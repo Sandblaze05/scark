@@ -1,5 +1,5 @@
 /**
- * agentLoop.js — Deliberation-based agent controller
+ * Deliberation-based agent controller
  *
  * Architecture: State + Plan (TaskGraph) → Deliberate → Execute Tasks → Update → Loop
  *
@@ -138,13 +138,111 @@ function buildShortTermMemoryBlock(shortTermContext = [], maxTurns = 8) {
 function buildMemoryPromptPrefix(state) {
   const shortTerm = buildShortTermMemoryBlock(state.shortTermContext, 8)
   const midTerm = (state.conversationSummary || '').replace(/\s+/g, ' ').trim()
+  const notes = (state.userNotes || '').trim()
 
   return [
     'Conversation memory:',
     `Short-term context (recent turns):\n${shortTerm}`,
     `Mid-term context (rolling summary):\n${midTerm || 'none'}`,
-    'Use this memory to resolve references and preserve continuity. If there is a conflict, trust recent turns over summary.',
-  ].join('\n\n')
+    notes
+      ? `Persistent user notes (cross-chat, high priority):\n${notes}`
+      : null,
+    'Use this memory to resolve references and preserve continuity. If there is a conflict, trust recent turns over summary. User notes override summary for preferences/identity.',
+  ].filter(Boolean).join('\n\n')
+}
+
+// ── User notes extractor ───────────────────────────────────────
+// Called AFTER a successful finalize to decide whether anything worth
+// remembering globally was revealed. Returns the merged notes string
+// (≤ 200 chars) or null if nothing new.
+
+export async function extractUserNotes(query, assistantText, existingNotes = '') {
+  try {
+    const text = await webllmComplete(
+      [
+        {
+          role: 'system',
+          content:
+            'You maintain a compact global memory of persistent user facts.\n\n' +
+            'Given the latest exchange, decide whether it reveals something durable to remember:\n' +
+            '  - Explicit preference or dislike ("I prefer X", "I hate Y")\n' +
+            '  - Name, role, location, or stable identity fact\n' +
+            '  - Recurring topic interest\n' +
+            '  - Explicit constraint or goal the user repeats\n\n' +
+            'Rules:\n' +
+            '- If nothing durable was revealed, reply with exactly: NULL\n' +
+            '- Otherwise, output ONLY the updated notes (merge old + new, max 200 chars).\n' +
+            '- Write as a tight comma-separated list of facts, no markdown, no preamble.\n' +
+            '- Remove contradicted old facts.',
+        },
+        {
+          role: 'user',
+          content:
+            `Existing notes: ${existingNotes || '(none)'}\n` +
+            `User: ${query.slice(0, 300)}\n` +
+            `Assistant: ${assistantText.slice(0, 400)}`,
+        },
+      ],
+      { maxTokens: 60 },
+    )
+
+    const result = (text || '').trim()
+    if (!result || result.toUpperCase() === 'NULL') return null
+    return result.slice(0, 220) // hard cap
+  } catch {
+    return null
+  }
+}
+
+// ── Query track classifier ─────────────────────────────────────
+// Classifies the incoming query into one of three execution tracks BEFORE the
+// main loop starts, so trivial / conversational queries never pay the cost of
+// deliberation + retrieval.
+//
+//   DIRECT   — answer is in-context; skip to finalize immediately.
+//              (greetings, simple math, follow-ups answerable from history)
+//   STANDARD — normal ask-mode pipeline (1 retrieval → draft → reflect → finalize)
+//   RESEARCH — deep research pipeline (multi-retrieval → summarize → draft → …)
+
+async function classifyQuery(query, conversationHistory = [], mode) {
+  // Research mode is never DIRECT — always run the full pipeline.
+  if (mode === 'research') return 'RESEARCH'
+
+  const recentConvo = buildRecentConversationBlock(conversationHistory, 4)
+
+  try {
+    const text = await webllmComplete(
+      [
+        {
+          role: 'system',
+          content:
+            'Classify the user query into exactly one track. Reply with ONLY the track name.\n\n' +
+            'DIRECT  → The query is a greeting, simple arithmetic/unit conversion, ' +
+            'or a short follow-up that can be answered fully from the conversation below ' +
+            '(no external information needed).\n' +
+            'STANDARD → Needs 1–2 retrieval actions (web search / knowledge base) to answer well.\n' +
+            'RESEARCH → Requires deep multi-source investigation (unlikely unless mode=research).\n\n' +
+            'Examples of DIRECT: "hello", "thanks", "what is 12*7", ' +
+            '"what did you just say", "can you shorten that", "in km please"\n' +
+            'Examples of STANDARD: "latest news on X", "how does Y work", "what is Z"\n\n' +
+            'Output ONLY one word: DIRECT, STANDARD, or RESEARCH.',
+        },
+        {
+          role: 'user',
+          content:
+            `Recent conversation:\n${recentConvo}\n\nNew query: ${query}`,
+        },
+      ],
+      { maxTokens: 5 },
+    )
+
+    const track = (text || '').trim().toUpperCase().split(/\s+/)[0]
+    if (track === 'DIRECT' || track === 'STANDARD' || track === 'RESEARCH') return track
+  } catch { /* fall through */ }
+
+  // Heuristic fallback: short messages with follow-up signals → DIRECT
+  if (isContextDependentFollowUp(query) && conversationHistory.length > 0) return 'DIRECT'
+  return 'STANDARD'
 }
 
 export async function recoverTimedOutTask(requestId, scark, abortCtrl, graceMs = TASK_TIMEOUT_GRACE_MS) {
@@ -337,8 +435,8 @@ function buildReasoningPreview(mode, stepLog, sourceCount, reflectionNotes) {
 // not by the LLM — keeping the prompt small and reliable.
 
 async function deliberate(state, plan, checkpoint) {
-  try { registerDefaultAdapters() } catch {}
-  
+  try { registerDefaultAdapters() } catch { }
+
   const summary = plan.getSummary()
   const recentConversation = buildRecentConversationBlock(
     state.newMessages?.length ? state.newMessages : state.conversationHistory,
@@ -418,7 +516,7 @@ function parseDeliberation(text, checkpoint, state, plan) {
     const parsed = JSON.parse(cleaned)
 
     if (checkpoint === 'start') {
-      try { registerDefaultAdapters() } catch {}
+      try { registerDefaultAdapters() } catch { }
       const valid = new Set(listTools().map(t => t.id))
       const tasks = (parsed.tasks || [])
         .filter(t => valid.has(t.toolId) && (t.args?.query || t.args?.url || Object.keys(t.args || {}).length >= 0)) // Just allow args to be there
@@ -538,7 +636,9 @@ async function executeDraft(task, state) {
 
   const context = buildSystemPrompt(mode, gathered, '')
   const memoryPrefix = buildMemoryPromptPrefix(state)
-  const fullMessages = [{ role: 'system', content: `${context.systemPrompt}\n\n${memoryPrefix}` }, ...newMessages]
+  // Strip any upstream system messages — we always prepend our own freshly-built one.
+  const userAssistantMessages = (newMessages || []).filter(m => m?.role !== 'system')
+  const fullMessages = [{ role: 'system', content: `${context.systemPrompt}\n\n${memoryPrefix}` }, ...userAssistantMessages]
 
   const baseInstruction = goal !== 'Standard answer'
     ? `STRICT FORMAT REQUIREMENT: ${goal}`
@@ -573,7 +673,9 @@ async function executeFinalize(task, state, { callbacks, abortCtrl }) {
 
   const context = buildSystemPrompt(mode, gathered, '')
   const memoryPrefix = buildMemoryPromptPrefix(state)
-  const fullMessages = [{ role: 'system', content: `${context.systemPrompt}\n\n${memoryPrefix}` }, ...newMessages]
+  // Strip any upstream system messages — we always prepend our own freshly-built one.
+  const userAssistantMessages = (newMessages || []).filter(m => m?.role !== 'system')
+  const fullMessages = [{ role: 'system', content: `${context.systemPrompt}\n\n${memoryPrefix}` }, ...userAssistantMessages]
 
   const finalInstruction = goal !== 'Standard answer'
     ? `STRICT FORMAT REQUIREMENT: ${goal}`
@@ -745,10 +847,10 @@ function handleTaskFailure(task, errorMsg, state, plan) {
 function taskStatusLabel(task) {
   // Internal agent tasks have fixed labels
   switch (task.toolId) {
-    case 'summarize':  return 'Summarizing evidence...'
-    case 'draft':      return task.args?.isRetry ? 'Improving draft...' : 'Drafting answer...'
-    case 'reflect':    return 'Evaluating draft...'
-    case 'finalize':   return 'Composing final answer...'
+    case 'summarize': return 'Summarizing evidence...'
+    case 'draft': return task.args?.isRetry ? 'Improving draft...' : 'Drafting answer...'
+    case 'reflect': return 'Evaluating draft...'
+    case 'finalize': return 'Composing final answer...'
   }
   // Registered tools: use manifest-provided statusLabel
   return getToolStatusLabel(task.toolId, task.args || {})
@@ -778,6 +880,7 @@ export async function runAgentLoop({
   newMessages,
   conversationSummary = '',
   shortTermContext = [],
+  userNotes = '',
   abortCtrl,
   callbacks,
   scark,
@@ -802,6 +905,7 @@ export async function runAgentLoop({
     conversationSummary: typeof conversationSummary === 'string' ? conversationSummary.trim() : '',
     shortTermContext: Array.isArray(shortTermContext) ? shortTermContext : [],
     conversationHistory: Array.isArray(conversationHistory) ? conversationHistory : [],
+    userNotes: typeof userNotes === 'string' ? userNotes.trim() : '',
     newMessages,          // full conversation, passed to LLM executors
     gathered: [],         // accumulated evidence documents
     failures: [],         // { tool, query, error }
@@ -828,6 +932,38 @@ export async function runAgentLoop({
     state.goal = 'Standard answer'
   }
   state.stepLog.push({ action: 'Formulate Goal', note: state.goal })
+
+  // ── Step 0b: Classify query track ─────────────────────────────
+  setStatus('Classifying query...')
+  let queryTrack = 'STANDARD'
+  try {
+    queryTrack = await classifyQuery(query, conversationHistory, mode)
+    throwIfAborted(abortCtrl)
+  } catch (err) {
+    if (err?.name === 'AbortError') throw err
+    queryTrack = 'STANDARD'
+  }
+  state.stepLog.push({ action: 'Classify', note: queryTrack })
+
+  // DIRECT track: skip deliberation + retrieval entirely, finalize from context.
+  if (queryTrack === 'DIRECT') {
+    setRoadmapStep('plan', 'completed', 'Direct answer')
+    setStatus('Composing answer...')
+    const directTask = { id: 'direct_finalize', toolId: 'finalize', args: {} }
+    try {
+      const directResult = await executeFinalize(directTask, state, { callbacks, abortCtrl })
+      return {
+        finalText: directResult.text || '',
+        sources: directResult.sources || [],
+        reasoningPreview: buildReasoningPreview(mode, state.stepLog, 0, ''),
+        streamBuffer: directResult.streamBuffer || '',
+      }
+    } catch (err) {
+      if (err?.name === 'AbortError') throw err
+      // Fall through to normal pipeline on error
+      queryTrack = 'STANDARD'
+    }
+  }
 
   // Start KB fallback fetch in parallel — merged into gathered at the end
   const fallbackCtxPromise = awaitWithAbort(
@@ -931,8 +1067,8 @@ export async function runAgentLoop({
       }
 
       if (!postRetrieveDeliberated
-          && !plan.hasActiveTool('draft')
-          && !plan.hasActiveTool('finalize')) {
+        && !plan.hasActiveTool('draft')
+        && !plan.hasActiveTool('finalize')) {
         postRetrieveDeliberated = true
         setStatus('Deliberating next phase...')
         setStreamingReasoningPreview(buildReasoningPreview(mode, state.stepLog, state.gathered.length, ''))

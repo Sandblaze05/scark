@@ -42,7 +42,7 @@ import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism'
 import { Copy, Check } from 'lucide-react'
 import { initEngine, streamChat as webllmStreamChat, complete as webllmComplete, DEFAULT_MODEL, AVAILABLE_MODELS, checkModelCached } from '../lib/webllm'
-import { runAgentLoop } from '../lib/agentLoop'
+import { runAgentLoop, extractUserNotes } from '../lib/agentLoop'
 import { ReasoningTimeline } from './timeline'
 
 const CodeBlock = React.memo(function CodeBlock({ language, value }) {
@@ -92,7 +92,7 @@ const CodeBlock = React.memo(function CodeBlock({ language, value }) {
 function FeedbackModal({ onClose, onSubmit }) {
   const [selectedTags, setSelectedTags] = useState([])
   const [details, setDetails] = useState('')
-  
+
   const tags = [
     "Incorrect or incomplete",
     "Not what I asked for",
@@ -101,35 +101,35 @@ function FeedbackModal({ onClose, onSubmit }) {
     "Safety or legal concern",
     "Other"
   ]
-  
+
   const toggleTag = (tag) => {
-    setSelectedTags(prev => 
+    setSelectedTags(prev =>
       prev.includes(tag) ? prev.filter(t => t !== tag) : [...prev, tag]
     )
   }
-  
+
   return (
-    <motion.div 
+    <motion.div
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
       exit={{ opacity: 0 }}
       className="fixed inset-0 z-100 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4"
       onClick={e => { if (e.target === e.currentTarget) onClose() }}
     >
-      <motion.div 
+      <motion.div
         initial={{ scale: 0.95, opacity: 0 }}
         animate={{ scale: 1, opacity: 1 }}
         className="w-full max-w-[480px] bg-[#171717] border border-white/10 rounded-2xl p-6 shadow-2xl overflow-hidden relative"
       >
-        <button 
+        <button
           onClick={onClose}
           className="absolute top-4 right-4 p-1 text-gray-400 hover:text-white transition-colors"
         >
           <X className="w-5 h-5" />
         </button>
-        
+
         <h3 className="text-xl font-semibold text-white mb-6">Share feedback</h3>
-        
+
         <div className="flex flex-wrap gap-2 mb-6">
           {tags.map(tag => (
             <button
@@ -146,18 +146,18 @@ function FeedbackModal({ onClose, onSubmit }) {
             </button>
           ))}
         </div>
-        
+
         <textarea
           value={details}
           onChange={e => setDetails(e.target.value)}
           placeholder="Share details (optional)"
           className="w-full h-24 bg-black/30 border border-white/10 rounded-xl px-4 py-3 text-sm text-white placeholder-gray-500 focus:outline-none focus:ring-1 focus:ring-white/20 transition-all resize-none mb-6"
         />
-        
+
         <div className="bg-white/5 rounded-xl p-4 mb-6 text-xs text-gray-400 leading-relaxed">
           Your conversation will be included with your feedback to help improve Scark. <a href="#" className="underline hover:text-white transition-colors">Learn more</a>
         </div>
-        
+
         <div className="flex justify-end">
           <button
             onClick={() => onSubmit({ tags: selectedTags, details })}
@@ -194,7 +194,7 @@ function ReasoningPreview({ text }) {
       // Split on arrow: "label → note"
       const arrowIdx = content.indexOf('→')
       const label = arrowIdx >= 0 ? content.slice(0, arrowIdx).trim() : content
-      const note  = arrowIdx >= 0 ? content.slice(arrowIdx + 1).trim() : ''
+      const note = arrowIdx >= 0 ? content.slice(arrowIdx + 1).trim() : ''
       steps.push({ num: parseInt(match[1], 10), label, note })
     }
   }
@@ -227,7 +227,7 @@ function ReasoningPreview({ text }) {
           className="text-white/25"
         >
           <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
-            <path d="M2 4l4 4 4-4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+            <path d="M2 4l4 4 4-4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
           </svg>
         </motion.span>
       </button>
@@ -418,10 +418,10 @@ const AnimatedLogo = React.memo(({ className = '' }) => {
         setRect(containerRef.current.getBoundingClientRect())
       }
     }
-    
+
     // Initial measure after a small delay to ensure DOM is settled
     const timeoutId = setTimeout(update, 50)
-    
+
     const onResize = () => {
       cancelAnimationFrame(animationFrameId)
       animationFrameId = requestAnimationFrame(update)
@@ -429,7 +429,7 @@ const AnimatedLogo = React.memo(({ className = '' }) => {
 
     window.addEventListener('resize', onResize)
     window.addEventListener('scroll', onResize, { passive: true })
-    
+
     return () => {
       clearTimeout(timeoutId)
       cancelAnimationFrame(animationFrameId)
@@ -449,24 +449,24 @@ const AnimatedLogo = React.memo(({ className = '' }) => {
             const dx = mousePosition.x - centerX
             const dy = mousePosition.y - centerY
             const dist = rect ? Math.sqrt(dx * dx + dy * dy) : 999
-            
+
             const maxDist = 200
             const rawInfluence = Math.max(0, 1 - dist / maxDist)
             const influence = Math.pow(rawInfluence, 1.4)
-            
+
             // Eye tracking math
             // Calculate direction of the mouse relative to the center
             const angle = Math.atan2(dy, dx)
             // Cap how far the eyes can move from the center of their sockets
             const maxEyeOffset = 1.2
             // Move eyes further when cursor is close, up to max offset
-            const eyeDist = Math.min(dist / 40, maxEyeOffset) 
+            const eyeDist = Math.min(dist / 40, maxEyeOffset)
             const eyeOffsetX = Math.cos(angle) * eyeDist
             const eyeOffsetY = Math.sin(angle) * eyeDist
 
             return (
               <motion.g
-                animate={{ 
+                animate={{
                   scale: 1 + influence * 0.15
                 }}
                 transition={{ type: "spring", stiffness: 350, damping: 20 }}
@@ -477,8 +477,8 @@ const AnimatedLogo = React.memo(({ className = '' }) => {
                   fill="currentColor"
                 />
                 <motion.circle
-                  animate={{ 
-                    cx: 9.5 + eyeOffsetX, 
+                  animate={{
+                    cx: 9.5 + eyeOffsetX,
                     cy: 10 + eyeOffsetY,
                     scaleY: isBlinking ? 0.1 : 1
                   }}
@@ -489,8 +489,8 @@ const AnimatedLogo = React.memo(({ className = '' }) => {
                   style={{ transformOrigin: `${9.5 + eyeOffsetX}px ${10 + eyeOffsetY}px` }}
                 />
                 <motion.circle
-                  animate={{ 
-                    cx: 14.5 + eyeOffsetX, 
+                  animate={{
+                    cx: 14.5 + eyeOffsetX,
                     cy: 10 + eyeOffsetY,
                     scaleY: isBlinking ? 0.1 : 1
                   }}
@@ -599,7 +599,7 @@ function roadmapToTimelineSteps(roadmap) {
 }
 
 export default function Chat({ isTemporary, setIsTemporary }) {
-    // Dynamic roadmap state will be built during execution.
+  // Dynamic roadmap state will be built during execution.
 
 
   const [value, setValue] = useState("")
@@ -1005,40 +1005,7 @@ export default function Chat({ isTemporary, setIsTemporary }) {
     }
   }, [stopAudio])
 
-  // Animated Placeholder Logic
-  const placeholders = [
-    "What's the net worth of Tejas Chauhan...",
-    "What's the weather like?",
-    "How do I center a div?",
-    "Generate a Python script...",
-    "Summarize my latest document."
-  ];
-  const [currentPlaceholder, setCurrentPlaceholder] = useState(0);
-  const intervalRef = useRef(null);
 
-  const startAnimation = useCallback(() => {
-    intervalRef.current = setInterval(() => {
-      setCurrentPlaceholder((prev) => (prev + 1) % placeholders.length);
-    }, 10000);
-  }, [placeholders.length]);
-
-  const handleVisibilityChange = useCallback(() => {
-    if (document.visibilityState !== "visible" && intervalRef.current) {
-      clearInterval(intervalRef.current);
-      intervalRef.current = null;
-    } else if (document.visibilityState === "visible") {
-      startAnimation();
-    }
-  }, [startAnimation]);
-
-  useEffect(() => {
-    startAnimation();
-    document.addEventListener("visibilitychange", handleVisibilityChange);
-    return () => {
-      if (intervalRef.current) clearInterval(intervalRef.current);
-      document.removeEventListener("visibilitychange", handleVisibilityChange);
-    };
-  }, [startAnimation, handleVisibilityChange]);
 
   // Backend Streaming States
   const [messages, setMessages] = useState([])
@@ -1437,13 +1404,13 @@ export default function Chat({ isTemporary, setIsTemporary }) {
       }
     }
     init()
-    
+
     // Load profile
     const loadProfile = async () => {
       try {
         const data = await window.scark?.profile?.get?.()
         if (data) setUserProfile(data)
-      } catch (e) {}
+      } catch (e) { }
     }
     loadProfile()
 
@@ -1644,6 +1611,7 @@ export default function Chat({ isTemporary, setIsTemporary }) {
         newMessages,
         conversationSummary: chatSummary,
         shortTermContext: currentMessages.slice(-8),
+        userNotes: userProfile?.agent_notes || '',
         abortCtrl,
         callbacks: agentCallbacks,
         scark: window.scark,
@@ -1683,7 +1651,19 @@ export default function Chat({ isTemporary, setIsTemporary }) {
         }
 
         updateRollingSummary(chatId, queryText, finalText, [...newMessages, { role: 'assistant', content: finalText }])
-        generateFollowUps(chatId, queryText, finalText)
+
+        // Extract and persist global notes asynchronously to prevent UI blocking
+        if (!isTemporary && chatId !== 'temp') {
+          const oldNotes = userProfile?.agent_notes || ''
+          extractUserNotes(queryText, finalText, oldNotes).then(async (newNotes) => {
+            if (newNotes && newNotes !== oldNotes) {
+              setUserProfile(prev => ({ ...prev, agent_notes: newNotes }))
+              await window.scark?.profile?.set?.({ agent_notes: newNotes })
+            }
+          }).catch(e => {
+            console.warn('[Chat] Failed to extract user notes:', e?.message || e)
+          })
+        }
       }
 
       if (result.sources?.length > 0) setSources(result.sources)
@@ -1740,7 +1720,7 @@ export default function Chat({ isTemporary, setIsTemporary }) {
     setFollowUpSuggestions([])
     await executeSend(query, currentMode, messages)
   }
-  
+
   const [isRefining, setIsRefining] = useState(false)
   const [previousPrompt, setPreviousPrompt] = useState('')
 
@@ -1752,7 +1732,7 @@ export default function Chat({ isTemporary, setIsTemporary }) {
       const refined = await webllmComplete([
         {
           role: 'system',
-          content: 
+          content:
             'You are a prompt engineering expert. Your task is to rewrite the user\'s message into a more detailed, clear, and research-optimized version. ' +
             'Focus on making it specific and likely to yield high-quality, comprehensive information. ' +
             'Keep it reasonably concise (under 80 words) but much more descriptive than the original. ' +
@@ -1764,7 +1744,7 @@ export default function Chat({ isTemporary, setIsTemporary }) {
         },
         { role: 'user', content: value.trim() }
       ], { temperature: 0.7, maxTokens: 150 })
-      
+
       if (refined && refined.trim()) {
         let cleaned = refined.trim()
         // Remove common boilerplate patterns if they leak through
@@ -1968,17 +1948,17 @@ export default function Chat({ isTemporary, setIsTemporary }) {
       {/* Scrollable Messages Area */}
       <div
         ref={scrollContainerRef}
-        className="flex-1 overflow-y-auto w-full scroll-smooth z-10"
+        className="flex-1 overflow-y-auto w-full scroll-smooth z-10 h-full"
         style={{ overflowAnchor: 'auto', overscrollBehaviorY: 'contain' }}
         onDragEnter={handleDrag}
         onDragLeave={handleDrag}
         onDragOver={handleDrag}
         onDrop={handleDrop}
       >
-        <div className="w-full max-w-5xl mx-auto px-6 py-6 pb-12 space-y-6 flex flex-col min-h-full">
+        <div className="w-full max-w-5xl mx-auto px-6 py-6 pb-40 space-y-6 flex flex-col min-h-full">
           {messages.length === 0 && (
-            <div className="flex-1 flex flex-col items-center justify-center space-y-4 pt-10">
-              <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.2, duration: 0.5 }} className="inline-block text-center">
+            <div className="absolute inset-x-0 top-0 bottom-24 flex flex-col items-center justify-center space-y-4 pointer-events-none z-0">
+              <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.2, duration: 0.5 }} className="inline-block text-center pointer-events-auto">
                 <div className="flex items-center justify-center gap-3 mb-3">
                   <AnimatedLogo className="mb-0 h-10" />
                   <span className="text-2xl font-semibold tracking-[0.28em] text-black/70 dark:text-white/70">SCARK</span>
@@ -2128,8 +2108,8 @@ export default function Chat({ isTemporary, setIsTemporary }) {
                           >
                             {turn.assistantMsg.roadmapSnapshot && (() => {
                               try {
-                                const snapshot = typeof turn.assistantMsg.roadmapSnapshot === 'string' 
-                                  ? JSON.parse(turn.assistantMsg.roadmapSnapshot) 
+                                const snapshot = typeof turn.assistantMsg.roadmapSnapshot === 'string'
+                                  ? JSON.parse(turn.assistantMsg.roadmapSnapshot)
                                   : turn.assistantMsg.roadmapSnapshot;
                                 return (
                                   <details className="mb-3 rounded-lg border border-black/10 dark:border-white/10 bg-white/2 px-3 py-2">
@@ -2142,7 +2122,7 @@ export default function Chat({ isTemporary, setIsTemporary }) {
                                     </div>
                                   </details>
                                 )
-                              } catch(e) { return null }
+                              } catch (e) { return null }
                             })()}
                             {turn.assistantMsg.reasoningPreview ? (
                               <ReasoningPreview text={turn.assistantMsg.reasoningPreview} />
@@ -2193,8 +2173,8 @@ export default function Chat({ isTemporary, setIsTemporary }) {
                                   onClick={() => handleFeedback(turnIndex, true)}
                                   className={cn(
                                     "p-1.5 rounded-lg transition-colors",
-                                    feedbackMap.get(turnIndex)?.type === 'positive' 
-                                      ? "text-gray-600 dark:text-gray-200 bg-black/5 dark:bg-white/10" 
+                                    feedbackMap.get(turnIndex)?.type === 'positive'
+                                      ? "text-gray-600 dark:text-gray-200 bg-black/5 dark:bg-white/10"
                                       : "text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 hover:bg-black/5 dark:hover:bg-white/10"
                                   )}
                                   title="Good response"
@@ -2207,8 +2187,8 @@ export default function Chat({ isTemporary, setIsTemporary }) {
                                   onClick={() => handleFeedback(turnIndex, false)}
                                   className={cn(
                                     "p-1.5 rounded-lg transition-colors",
-                                    feedbackMap.get(turnIndex)?.type === 'negative' 
-                                      ? "text-gray-600 dark:text-gray-200 bg-black/5 dark:bg-white/10" 
+                                    feedbackMap.get(turnIndex)?.type === 'negative'
+                                      ? "text-gray-600 dark:text-gray-200 bg-black/5 dark:bg-white/10"
                                       : "text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 hover:bg-black/5 dark:hover:bg-white/10"
                                   )}
                                   title="Bad response"
@@ -2384,8 +2364,8 @@ export default function Chat({ isTemporary, setIsTemporary }) {
       </div>
 
       {/* Input Footer Area */}
-      <div className="shrink-0 p-4 max-w-3xl mx-auto w-full z-20 pb-8">
-
+      <div className="absolute bottom-0 left-0 w-full pointer-events-none z-20 pb-8 flex justify-center">
+        <div className="p-4 max-w-3xl w-full pointer-events-auto">
         {/* WebLLM model loading banner – blocks input and shows real progress */}
         <AnimatePresence>
           {modelLoading && (
@@ -2456,7 +2436,7 @@ export default function Chat({ isTemporary, setIsTemporary }) {
                       onClick={() => removeAttachment(i)}
                       className="absolute -top-2 -left-2 z-10 w-5 h-5 bg-[#212121] border border-white/10 rounded-full flex items-center justify-center text-white/70 hover:text-white transition-colors shadow-sm"
                     >
-                      <XIcon className="w-3 h-3" />
+                      <X className="w-3 h-3" />
                     </button>
                     {isImage ? (
                       <div className="w-18 h-18 rounded-xl overflow-hidden shadow-sm">
@@ -2509,31 +2489,13 @@ export default function Chat({ isTemporary, setIsTemporary }) {
                 onPaste={handlePaste}
                 onFocus={() => setInputFocused(true)}
                 onBlur={() => setInputFocused(false)}
-                placeholder=""
+                placeholder="Ask here"
                 containerClassName="w-full relative z-10"
                 className="w-full px-4 py-3 resize-none bg-transparent border-none text-foreground text-sm focus:outline-none placeholder:text-muted-foreground min-h-11 disabled:opacity-40 disabled:cursor-not-allowed"
                 style={{ overflow: "hidden" }}
                 showRing={false}
                 disabled={modelLoading}
               />
-
-              {/* Overlapping animated placeholder aligned with px-4 py-[12px] padding */}
-              <div className="absolute top-0 left-0 right-0 h-11 flex px-4 py-3 pointer-events-none z-0">
-                <AnimatePresence mode="wait">
-                  {!value && !inputFocused && !isTranscribing && (
-                    <motion.p
-                      initial={{ y: 5, opacity: 0 }}
-                      key={`current-placeholder-${currentPlaceholder}`}
-                      animate={{ y: 0, opacity: 1 }}
-                      exit={{ y: -15, opacity: 0 }}
-                      transition={{ duration: 0.3, ease: "linear" }}
-                      className="text-sm font-normal text-muted-foreground/70 truncate drop-shadow-sm select-none m-0"
-                    >
-                      {placeholders[currentPlaceholder]}
-                    </motion.p>
-                  )}
-                </AnimatePresence>
-              </div>
             </div>
           </div>
 
@@ -2551,7 +2513,7 @@ export default function Chat({ isTemporary, setIsTemporary }) {
                     className="p-1.5 rounded-full bg-black/5 dark:bg-white/10 text-muted-foreground hover:text-foreground hover:bg-black/10 dark:hover:bg-white/20 transition-colors cursor-pointer disabled:opacity-50"
                     title="Discard"
                   >
-                    <XIcon className="w-3.5 h-3.5" />
+                    <X className="w-3.5 h-3.5" />
                   </button>
                   <button
                     onClick={stopListening}
@@ -2682,12 +2644,12 @@ export default function Chat({ isTemporary, setIsTemporary }) {
             </div>
           </div>
         </motion.div>
-
+        </div>
       </div>
 
       <AnimatePresence>
         {feedbackModalTurnIndex !== null && (
-          <FeedbackModal 
+          <FeedbackModal
             onClose={() => setFeedbackModalTurnIndex(null)}
             onSubmit={(data) => {
               setFeedbackMap(prev => {
