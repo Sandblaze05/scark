@@ -1,10 +1,3 @@
-/**
- * Electron Preload – CJS (required for sandbox: true)
- *
- * Exposes a safe `window.scark` API to the renderer via contextBridge.
- * The renderer never gets direct access to Node.js or Electron internals.
- */
-
 const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('scark', {

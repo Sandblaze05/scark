@@ -1,6 +1,7 @@
-import "./globals.css";
+import "../styles/globals.css"; // Adjust path if your styles are elsewhere
 import { Geist, Geist_Mono } from "next/font/google";
 import { ThemeProvider } from "../components/ThemeProvider";
+import Head from "next/head";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -12,25 +13,23 @@ const geistMono = Geist_Mono({
   subsets: ["latin"],
 });
 
-export const metadata = {
-  title: "Scark",
-};
-
-export default function RootLayout({ children }) {
+export default function App({ Component, pageProps }) {
   return (
-    <html lang="en" suppressHydrationWarning>
-      <body
-        className={`${geistSans.variable} ${geistMono.variable} antialiased selection:bg-purple-500/30 selection:text-white`}
-      >
+    <>
+      <Head>
+        <title>Scark</title>
+      </Head>
+
+      <div className={`${geistSans.variable} ${geistMono.variable} font-sans`}>
         <ThemeProvider
           attribute="class"
           defaultTheme="dark"
           enableSystem
           disableTransitionOnChange
         >
-          {children}
+          <Component {...pageProps} />
         </ThemeProvider>
-      </body>
-    </html>
+      </div>
+    </>
   );
 }

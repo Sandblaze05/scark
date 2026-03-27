@@ -1,0 +1,15 @@
+appId: com.scark.app
+productName: Scark
+copyright: Copyright © 2026 Scark
+directories:
+  output: dist
+  buildResources: resources
+extraResources:
+  - from: resources/bin
+    to: bin
+files:
+  - from: .
+    filter:
+      - package.json
+      - app
+publish: null

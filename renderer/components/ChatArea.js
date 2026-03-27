@@ -1,4 +1,3 @@
-'use client'
 import React, { useState, useEffect, useRef } from 'react'
 import Chat from './Chat'
 import { ChevronDown, Pin, PinOff, Pencil, Trash2, Ghost } from 'lucide-react'

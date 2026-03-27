@@ -1,5 +1,3 @@
-'use client'
-
 import Navbar from "../components/Navbar";
 import ChatArea from "../components/ChatArea";
 

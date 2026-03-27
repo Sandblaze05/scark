@@ -1,22 +1,18 @@
+# dependencies
+node_modules
+
+# logs
+*.log
+
+# next.js
+.next
+next-env.d.ts
+
+# build
+/app
+dist
+
 chroma/
-check-stores.js
-chroma-data/
 scark.db
-dist/
 
-# next
-.next/
-renderer/.next/
-renderer/.next
-renderer/out/
-
-
-# Playwright
-node_modules/
-/test-results/
-/playwright-report/
-/blob-report/
-/playwright/.cache/
-/playwright/.auth/
-scark.db-shm
-scark.db-wal
+resources/bin

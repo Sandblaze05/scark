@@ -1,5 +1,3 @@
-'use client'
-
 import React, { useRef, useState, useCallback, useEffect, useTransition, useMemo } from 'react'
 import gsap from 'gsap'
 import {

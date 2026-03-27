@@ -5,7 +5,15 @@
  * The model is downloaded once and cached in the browser's Cache API (IndexedDB).
  */
 
-import * as webllm from '@mlc-ai/web-llm';
+// Lazily import the ESM-only `@mlc-ai/web-llm` at runtime in the browser.
+// This avoids Next/Turbopack attempting to require it during SSR where
+// `require` is not available for ESM modules.
+let _webllmModule = null;
+async function ensureWebllmModule() {
+    if (typeof window === 'undefined') throw new Error('WebLLM can only be used in the browser');
+    if (!_webllmModule) _webllmModule = await import('@mlc-ai/web-llm');
+    return _webllmModule;
+}
 import { Zap, MessagesSquare, Sparkles, Sun, Cpu } from 'lucide-react'
 import { listTools, registerDefaultAdapters } from './toolRegistry.js';
 
@@ -82,7 +90,7 @@ const _s = globalThis.__webllmState;
  * @param {(report: import('@mlc-ai/web-llm').InitProgressReport) => void} [onProgress]
  * @returns {Promise<import('@mlc-ai/web-llm').MLCEngine>}
  */
-export function initEngine(model = DEFAULT_MODEL, onProgress) {
+export async function initEngine(model = DEFAULT_MODEL, onProgress) {
     // Return cached engine if the same model is already loaded
     if (_s.engine && _s.loadedModel === model) return Promise.resolve(_s.engine);
 
@@ -111,6 +119,8 @@ export function initEngine(model = DEFAULT_MODEL, onProgress) {
         return _s.promise;
     }
 
+    // Import the library lazily in the browser environment
+    const webllm = await ensureWebllmModule();
     _s.promise = webllm.CreateWebWorkerMLCEngine(_s.worker, model, {
         initProgressCallback: onProgress,
     }).then(engine => {
@@ -133,6 +143,7 @@ export function isEngineReady() {
 
 /** Check if model exists in IndexedDB cache */
 export async function checkModelCached(modelId) {
+    const webllm = await ensureWebllmModule();
     return await webllm.hasModelInCache(modelId);
 }
 
@@ -144,6 +155,7 @@ export async function deleteModel(modelId) {
         _s.engine = null;
         _s.loadedModel = null;
     }
+    const webllm = await ensureWebllmModule();
     await webllm.deleteModelAllInfoInCache(modelId);
 }
 
@@ -201,6 +213,8 @@ function trimMessages(messages) {
  * @yields {string} token strings
  */
 export async function* streamChat(messages, { signal } = {}) {
+    // If engine isn't ready yet but init is in-flight, wait for it.
+    if (!_s.engine && _s.promise) await _s.promise;
     if (!_s.engine) throw new Error('WebLLM engine is not initialised. Call initEngine() first.');
 
     const stream = await _s.engine.chat.completions.create({
@@ -227,6 +241,8 @@ export async function* streamChat(messages, { signal } = {}) {
  * @returns {Promise<string>}
  */
 export async function complete(messages, { signal, maxTokens } = {}) {
+    // If engine isn't ready yet but init is in-flight, wait for it.
+    if (!_s.engine && _s.promise) await _s.promise;
     if (!_s.engine) throw new Error('WebLLM engine is not initialised. Call initEngine() first.');
 
     const result = await _s.engine.chat.completions.create({

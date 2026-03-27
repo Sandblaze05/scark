@@ -2,7 +2,9 @@ import Database from 'better-sqlite3';
 import path from 'path';
 import { randomUUID } from 'crypto';
 
-const DB_PATH = process.env.SQLITE_PATH || path.join(process.cwd(), 'scark.db');
+function getDbPath() {
+    return process.env.SQLITE_PATH || path.join(process.cwd(), 'scark.db');
+}
 
 let _db = null;
 const MAX_CHAT_MESSAGES = 24;
@@ -25,7 +27,8 @@ function nowIso() {
 function getDb() {
     if (_db) return _db;
 
-    _db = new Database(DB_PATH);
+    const dbPath = getDbPath();
+    _db = new Database(dbPath);
     _db.pragma('journal_mode = WAL');   // better write concurrency
     _db.pragma('foreign_keys = ON');
 
@@ -100,7 +103,7 @@ function getDb() {
     // Migration for existing databases
     try { _db.exec("ALTER TABLE chat_sessions ADD COLUMN turn_versions_json TEXT DEFAULT '{}'"); } catch (e) {}
 
-    console.log(`[SQLite] Database ready at ${DB_PATH}`);
+    console.log(`[SQLite] Database ready at ${dbPath}`);
     return _db;
 }
 
